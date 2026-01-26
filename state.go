@@ -6,13 +6,13 @@ import (
 
 // stateManager handles slot allocation, deduplication, and recycling.
 type stateManager struct {
-	state            [][]byte          // The state array
-	literalSlotMap   map[string]uint8  // Literal hash -> slot for deduplication
+	state            [][]byte           // The state array
+	literalSlotMap   map[string]uint8   // Literal hash -> slot for deduplication
 	returnSlotMap    map[*Command]uint8 // Command -> its return slot
-	freeSlots        []uint8           // Recycled slots available for reuse
-	stateExpirations map[int][]uint8   // Command index -> slots freed after it
-	config           *planConfig       // Plan configuration
-	nextSlot         uint8             // Next slot to allocate
+	freeSlots        []uint8            // Recycled slots available for reuse
+	stateExpirations map[int][]uint8    // Command index -> slots freed after it
+	config           *planConfig        // Plan configuration
+	nextSlot         uint8              // Next slot to allocate
 }
 
 // newStateManager creates a new state manager.
@@ -30,6 +30,9 @@ func newStateManager(config *planConfig) *stateManager {
 
 // allocateLiteral adds a literal to state, with deduplication.
 // Returns the slot index (with dynamic flag if applicable).
+// Note: Literals never reuse freed slots because they need their initial
+// value preserved throughout execution. Freed slots are only for return
+// values which are written during execution.
 func (sm *stateManager) allocateLiteral(lit *LiteralValue) (uint8, error) {
 	// Create a key for deduplication
 	key := hex.EncodeToString(lit.data)
@@ -42,7 +45,10 @@ func (sm *stateManager) allocateLiteral(lit *LiteralValue) (uint8, error) {
 		return slot, nil
 	}
 
-	slot, err := sm.allocateSlot()
+	// Always allocate a NEW slot for literals (don't reuse freed return slots)
+	// This is because literals are in the initial state and must not be
+	// overwritten by return values during execution.
+	slot, err := sm.allocateNewSlot()
 	if err != nil {
 		return 0, err
 	}
@@ -58,6 +64,7 @@ func (sm *stateManager) allocateLiteral(lit *LiteralValue) (uint8, error) {
 
 // allocateReturn allocates a slot for a command's return value.
 // lastUsage is the command index where this value is last used.
+// Return slots CAN reuse freed slots since they're written during execution.
 func (sm *stateManager) allocateReturn(cmd *Command, lastUsage int, isDynamic bool) (uint8, error) {
 	slot, err := sm.allocateSlot()
 	if err != nil {
@@ -78,6 +85,7 @@ func (sm *stateManager) allocateReturn(cmd *Command, lastUsage int, isDynamic bo
 }
 
 // allocateSlot gets a free slot, either from recycled pool or new.
+// Used for return value slots which can safely reuse freed slots.
 func (sm *stateManager) allocateSlot() (uint8, error) {
 	// Try to reuse a freed slot (if optimization enabled)
 	if sm.config.optimizeSlots && len(sm.freeSlots) > 0 {
@@ -86,7 +94,12 @@ func (sm *stateManager) allocateSlot() (uint8, error) {
 		return slot, nil
 	}
 
-	// Allocate new slot
+	return sm.allocateNewSlot()
+}
+
+// allocateNewSlot always allocates a fresh slot, never reusing freed ones.
+// Used for literals which must preserve their initial value.
+func (sm *stateManager) allocateNewSlot() (uint8, error) {
 	if int(sm.nextSlot) >= sm.config.maxStateSlots {
 		return 0, ErrSlotExhausted
 	}

@@ -622,3 +622,132 @@ func TestDynamicValueSlots(t *testing.T) {
 		}
 	})
 }
+
+// TestLiteralsNeverReuseFreedReturnSlots tests that literals always get fresh
+// slots and never reuse freed return value slots. This is critical because:
+//  1. Literals are in the INITIAL state array
+//  2. Return values are written DURING execution
+//  3. If a literal reused a freed return slot, the return value would overwrite
+//     the literal data during execution, corrupting later operations that need it.
+//
+// Scenario being tested (the bug that was fixed):
+// - Command 0: some operation
+// - Command 1: returns dynamic data, stored in slot N, used by Command 2
+// - Command 2: uses Command 1's return (last usage, so slot N is freed after)
+// - Command 3: has a NEW literal argument
+// - BUG: literal was being allocated to freed slot N
+// - FIX: literal must get a NEW slot, not reuse slot N
+func TestLiteralsNeverReuseFreedReturnSlots(t *testing.T) {
+	t.Run("literal allocation ignores freed return slots", func(t *testing.T) {
+		config := defaultPlanConfig()
+		config.optimizeSlots = true // Enable slot optimization
+		sm := newStateManager(config)
+
+		// Simulate the scenario:
+		// 1. Allocate some initial literals (like function args)
+		lit1 := Uint256(big.NewInt(100))
+		slot1, _ := sm.allocateLiteral(lit1)
+
+		lit2 := Uint256(big.NewInt(200))
+		slot2, _ := sm.allocateLiteral(lit2)
+
+		// 2. Create a mock command and allocate its return slot
+		mockCmd := &Command{returnSlot: -1}
+		lastUsage := 2 // Will be "freed" after command index 2
+		returnSlot, err := sm.allocateReturn(mockCmd, lastUsage, true)
+		if err != nil {
+			t.Fatalf("Failed to allocate return: %v", err)
+		}
+		returnSlotIdx := returnSlot & ^uint8(DynamicSlotFlag)
+
+		// 3. Expire the slot (simulating that we've processed past lastUsage)
+		sm.expireSlots(lastUsage)
+
+		// Verify the return slot is now in the free list
+		if len(sm.freeSlots) != 1 {
+			t.Fatalf("Expected 1 free slot, got %d", len(sm.freeSlots))
+		}
+		if sm.freeSlots[0] != returnSlotIdx {
+			t.Fatalf("Expected freed slot %d in freeSlots, got %d", returnSlotIdx, sm.freeSlots[0])
+		}
+
+		// 4. Now allocate a NEW literal - this is where the bug would manifest
+		// The literal should NOT get the freed return slot
+		lit3 := Uint256(big.NewInt(999)) // Different value, not deduplicated
+		slot3, err := sm.allocateLiteral(lit3)
+		if err != nil {
+			t.Fatalf("Failed to allocate literal: %v", err)
+		}
+
+		// KEY ASSERTION: The new literal must NOT use the freed return slot
+		if slot3 == returnSlotIdx {
+			t.Errorf("BUG: Literal was allocated to freed return slot %d! "+
+				"This would cause the return value to overwrite the literal during execution.",
+				returnSlotIdx)
+		}
+
+		// The literal should get a fresh slot
+		expectedSlot := uint8(3) // slot 0, 1, 2 already used, so next is 3
+		if slot3 != expectedSlot {
+			t.Errorf("Expected literal to get fresh slot %d, got slot %d", expectedSlot, slot3)
+		}
+
+		// The free slots should still contain the return slot (not consumed by literal)
+		if len(sm.freeSlots) != 1 {
+			t.Errorf("Expected freed return slot to remain available, but freeSlots has %d entries", len(sm.freeSlots))
+		}
+
+		// Verify the state array has correct data
+		if sm.state[slot3] == nil {
+			t.Error("Literal slot should have data")
+		}
+
+		// Cleanup: verify we used the expected slots
+		t.Logf("Slot allocation: lit1=%d, lit2=%d, return=%d, lit3=%d",
+			slot1, slot2, returnSlotIdx, slot3)
+	})
+
+	t.Run("return slots can reuse freed return slots", func(t *testing.T) {
+		config := defaultPlanConfig()
+		config.optimizeSlots = true
+		sm := newStateManager(config)
+
+		// Allocate first return slot
+		cmd1 := &Command{returnSlot: -1}
+		slot1, _ := sm.allocateReturn(cmd1, 1, false)
+
+		// Expire it
+		sm.expireSlots(1)
+
+		// Allocate second return slot - should reuse the freed one
+		cmd2 := &Command{returnSlot: -1}
+		slot2, _ := sm.allocateReturn(cmd2, 2, false)
+
+		// Return slots SHOULD reuse freed slots (that's the optimization)
+		if slot2 != slot1 {
+			t.Errorf("Expected return slot to reuse freed slot %d, but got %d", slot1, slot2)
+		}
+	})
+
+	t.Run("dynamic literal also gets fresh slot", func(t *testing.T) {
+		config := defaultPlanConfig()
+		config.optimizeSlots = true
+		sm := newStateManager(config)
+
+		// Allocate and free a return slot
+		cmd := &Command{returnSlot: -1}
+		returnSlot, _ := sm.allocateReturn(cmd, 0, true)
+		returnSlotIdx := returnSlot & ^uint8(DynamicSlotFlag)
+		sm.expireSlots(0)
+
+		// Allocate a dynamic literal (bytes is dynamic type)
+		dynamicLit := Bytes([]byte{0x01, 0x02, 0x03, 0x04, 0x05})
+		litSlot, _ := sm.allocateLiteral(dynamicLit)
+		litSlotIdx := litSlot & ^uint8(DynamicSlotFlag)
+
+		// Dynamic literal should also not reuse the freed slot
+		if litSlotIdx == returnSlotIdx {
+			t.Errorf("BUG: Dynamic literal was allocated to freed return slot %d!", returnSlotIdx)
+		}
+	})
+}

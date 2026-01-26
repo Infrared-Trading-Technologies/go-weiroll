@@ -53,11 +53,11 @@ const (
 	// FlagCallTypeMask masks the call type bits.
 	FlagCallTypeMask CallFlags = 0x03
 
-	// FlagExtendedCommand indicates an extended command (>6 args).
-	FlagExtendedCommand CallFlags = 0x40
-
 	// FlagTupleReturn wraps multi-return values as raw bytes.
-	FlagTupleReturn CallFlags = 0x80
+	FlagTupleReturn CallFlags = 0x40
+
+	// FlagExtendedCommand indicates an extended command (>6 args).
+	FlagExtendedCommand CallFlags = 0x80
 )
 
 // CallType returns just the call type portion of the flags.

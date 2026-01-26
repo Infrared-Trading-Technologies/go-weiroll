@@ -448,11 +448,11 @@ func TestConstants(t *testing.T) {
 		if FlagCallTypeMask != 0x03 {
 			t.Errorf("Expected FlagCallTypeMask=0x03, got %d", FlagCallTypeMask)
 		}
-		if FlagExtendedCommand != 0x40 {
-			t.Errorf("Expected FlagExtendedCommand=0x40, got %d", FlagExtendedCommand)
+		if FlagExtendedCommand != 0x80 {
+			t.Errorf("Expected FlagExtendedCommand=0x80, got %d", FlagExtendedCommand)
 		}
-		if FlagTupleReturn != 0x80 {
-			t.Errorf("Expected FlagTupleReturn=0x80, got %d", FlagTupleReturn)
+		if FlagTupleReturn != 0x40 {
+			t.Errorf("Expected FlagTupleReturn=0x40, got %d", FlagTupleReturn)
 		}
 	})
 }
