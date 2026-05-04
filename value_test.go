@@ -1,11 +1,13 @@
 package weiroll
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
 )
 
 func TestLiteralValue(t *testing.T) {
@@ -500,6 +502,7 @@ func TestConvertToABIType(t *testing.T) {
 		{"int32", int32(42)},
 		{"uint32", uint32(42)},
 		{"*big.Int", big.NewInt(42)},
+		{"*uint256.Int", uint256.NewInt(42)},
 	}
 
 	for _, tt := range tests {
@@ -523,6 +526,39 @@ func TestConvertToABIType(t *testing.T) {
 			t.Error("Non-numeric types should pass through unchanged")
 		}
 	})
+
+	t.Run("nil *uint256.Int does not panic", func(t *testing.T) {
+		result := convertToABIType((*uint256.Int)(nil), abiType)
+		b, ok := result.(*big.Int)
+		if !ok {
+			t.Fatalf("Expected *big.Int, got %T", result)
+		}
+		if b != nil {
+			t.Errorf("Expected typed nil *big.Int, got %v", b)
+		}
+	})
+}
+
+func TestUint256FromU256(t *testing.T) {
+	lit := Uint256FromU256(uint256.NewInt(12345))
+
+	if lit.IsDynamic() {
+		t.Error("uint256 should not be dynamic")
+	}
+
+	if lit.Type().String() != "uint256" {
+		t.Errorf("Expected type uint256, got %s", lit.Type().String())
+	}
+
+	if len(lit.Data()) != 32 {
+		t.Errorf("Expected 32 bytes, got %d", len(lit.Data()))
+	}
+
+	// Encoded bytes must match the *big.Int constructor for the same value.
+	want := Uint256(big.NewInt(12345)).Data()
+	if !bytes.Equal(lit.Data(), want) {
+		t.Errorf("Uint256FromU256 encoding mismatch:\n got  %x\n want %x", lit.Data(), want)
+	}
 }
 
 func TestIsValue(t *testing.T) {

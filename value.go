@@ -5,6 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
 )
 
 // Value represents any value that can be used in weiroll commands.
@@ -222,6 +223,11 @@ func convertToABIType(value any, abiType abi.Type) any {
 		return big.NewInt(int64(v))
 	case uint32:
 		return new(big.Int).SetUint64(uint64(v))
+	case *uint256.Int:
+		if v == nil {
+			return (*big.Int)(nil)
+		}
+		return v.ToBig()
 	default:
 		return v
 	}
@@ -229,6 +235,11 @@ func convertToABIType(value any, abiType abi.Type) any {
 
 // Uint256 creates a uint256 literal from a *big.Int.
 func Uint256(v *big.Int) *LiteralValue {
+	return MustLiteralFromType("uint256", v)
+}
+
+// Uint256FromU256 creates a uint256 literal from a *uint256.Int.
+func Uint256FromU256(v *uint256.Int) *LiteralValue {
 	return MustLiteralFromType("uint256", v)
 }
 
