@@ -1,8 +1,11 @@
 package weiroll
 
 import (
+	"bytes"
 	"math/big"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -697,6 +700,298 @@ func TestCheckCycle(t *testing.T) {
 			t.Errorf("Expected ErrCyclicPlanner, got %v", err)
 		}
 	})
+}
+
+func TestPlannerClone(t *testing.T) {
+	testABI := plannerTestABI()
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	contract := NewContract(addr, testABI)
+	lib := NewLibrary(addr, testABI)
+
+	t.Run("empty planner clones to empty planner", func(t *testing.T) {
+		p := New()
+		c := p.Clone()
+
+		if c == p {
+			t.Fatal("Clone should return a new pointer")
+		}
+		if c.Len() != 0 {
+			t.Errorf("Expected 0 commands, got %d", c.Len())
+		}
+	})
+
+	t.Run("commands slice is independent", func(t *testing.T) {
+		p := New()
+		p.Add(contract.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+
+		c := p.Clone()
+		c.Add(contract.MustInvoke("add", big.NewInt(3), big.NewInt(4)))
+
+		if p.Len() != 1 {
+			t.Errorf("Original should still have 1 command, got %d", p.Len())
+		}
+		if c.Len() != 2 {
+			t.Errorf("Clone should have 2 commands, got %d", c.Len())
+		}
+
+		if p.CommandAt(0) == c.CommandAt(0) {
+			t.Error("Cloned commands must not share pointers with the original")
+		}
+	})
+
+	t.Run("ReturnValue references rewire to clone commands", func(t *testing.T) {
+		p := New()
+		sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+		p.Add(lib.MustInvoke("multiply", sum, big.NewInt(10)))
+
+		c := p.Clone()
+
+		// The second command's first arg is a ReturnValue pointing at the
+		// FIRST command. After cloning it must point at the clone's first
+		// command, not the original's.
+		secondArgs := c.CommandAt(1).Call().Args()
+		rv, ok := secondArgs[0].(*ReturnValue)
+		if !ok {
+			t.Fatalf("Expected *ReturnValue, got %T", secondArgs[0])
+		}
+		if rv.command != c.CommandAt(0) {
+			t.Error("ReturnValue should point at the clone's command, not the original's")
+		}
+		if rv.command == p.CommandAt(0) {
+			t.Error("ReturnValue must not still point at the original command")
+		}
+	})
+
+	t.Run("Plan output equals original after planning either first", func(t *testing.T) {
+		build := func() *Planner {
+			p := New()
+			sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+			p.Add(lib.MustInvoke("multiply", sum, big.NewInt(10)))
+			return p
+		}
+
+		// Plan the original first; clone afterwards (so clone inherits any
+		// returnSlot mutations from the original Plan call).
+		orig := build()
+		origPlan, err := orig.Plan()
+		if err != nil {
+			t.Fatalf("orig.Plan: %v", err)
+		}
+
+		c := orig.Clone()
+		clonePlan, err := c.Plan()
+		if err != nil {
+			t.Fatalf("clone.Plan: %v", err)
+		}
+
+		if !equalCompiledPlans(origPlan, clonePlan) {
+			t.Error("Original and clone produced different compiled plans")
+		}
+
+		// Re-plan original; output should still match.
+		origPlan2, err := orig.Plan()
+		if err != nil {
+			t.Fatalf("orig.Plan (second): %v", err)
+		}
+		if !equalCompiledPlans(origPlan, origPlan2) {
+			t.Error("Re-planning original after cloning produced different output")
+		}
+	})
+
+	t.Run("planning clone does not mutate original commands", func(t *testing.T) {
+		p := New()
+		sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+		p.Add(lib.MustInvoke("multiply", sum, big.NewInt(10)))
+
+		c := p.Clone()
+
+		// Snapshot the original's returnSlots BEFORE planning the clone.
+		preSlots := make([]int, p.Len())
+		for i := 0; i < p.Len(); i++ {
+			preSlots[i] = p.CommandAt(i).returnSlot
+		}
+
+		if _, err := c.Plan(); err != nil {
+			t.Fatalf("clone.Plan: %v", err)
+		}
+
+		for i := 0; i < p.Len(); i++ {
+			if p.CommandAt(i).returnSlot != preSlots[i] {
+				t.Errorf("Command %d on original was mutated by clone.Plan(): %d -> %d",
+					i, preSlots[i], p.CommandAt(i).returnSlot)
+			}
+		}
+	})
+
+	t.Run("WithValue is preserved and *big.Int is copied defensively", func(t *testing.T) {
+		amount := big.NewInt(1000)
+		p := New()
+		p.Add(contract.MustInvoke("noReturn", big.NewInt(1)).WithValue(amount))
+
+		c := p.Clone()
+
+		cloneVal := c.CommandAt(0).Call().EthValue()
+		if cloneVal == nil || cloneVal.Cmp(amount) != 0 {
+			t.Fatalf("Expected EthValue=%s on clone, got %v", amount, cloneVal)
+		}
+		// Mutating the clone's value must not bleed into the original.
+		cloneVal.SetInt64(42)
+		if p.CommandAt(0).Call().EthValue().Cmp(amount) != 0 {
+			t.Error("Mutating clone's EthValue affected the original")
+		}
+	})
+
+	t.Run("subplan tree is cloned and re-wired", func(t *testing.T) {
+		p := New()
+		sub := New()
+		sub.Add(contract.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+
+		execCall := contract.MustInvoke("execute", sub.Subplan(), p.State())
+		if _, err := p.AddSubplan(execCall, sub); err != nil {
+			t.Fatalf("AddSubplan: %v", err)
+		}
+
+		c := p.Clone()
+
+		// The cloned outer planner's first command's args should reference
+		// the CLONED inner subplanner, not the original.
+		args := c.CommandAt(0).Call().Args()
+
+		var cloneSubPlanner *Planner
+		var cloneStatePlanner *Planner
+		for _, a := range args {
+			switch v := a.(type) {
+			case *SubplanValue:
+				cloneSubPlanner = v.subplanner
+			case *StateValue:
+				cloneStatePlanner = v.planner
+			}
+		}
+
+		if cloneSubPlanner == nil {
+			t.Fatal("Cloned call missing SubplanValue arg")
+		}
+		if cloneSubPlanner == sub {
+			t.Error("SubplanValue still references original subplanner")
+		}
+		if cloneSubPlanner.Len() != sub.Len() {
+			t.Errorf("Cloned subplan should have %d commands, got %d", sub.Len(), cloneSubPlanner.Len())
+		}
+
+		if cloneStatePlanner == nil {
+			t.Fatal("Cloned call missing StateValue arg")
+		}
+		if cloneStatePlanner != c {
+			t.Error("StateValue should reference the cloned outer planner, not original or another instance")
+		}
+	})
+
+	t.Run("parent pointer is reset on clone", func(t *testing.T) {
+		p := New()
+		sub := New()
+		sub.Add(contract.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+		execCall := contract.MustInvoke("execute", sub.Subplan(), p.State())
+		if _, err := p.AddSubplan(execCall, sub); err != nil {
+			t.Fatalf("AddSubplan: %v", err)
+		}
+
+		// sub now has parent == p. Clone the *subplanner* directly.
+		subClone := sub.Clone()
+		if subClone.parent != nil {
+			t.Error("Clone should reset parent to nil")
+		}
+	})
+
+	t.Run("ReturnValue outside cloned subtree is preserved", func(t *testing.T) {
+		// Hand-craft a Call whose ReturnValue points at a command in a
+		// different planner that is NOT reachable from the one being cloned.
+		// Cloning should leave that ReturnValue alone rather than panic.
+		other := New()
+		otherRV := other.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+
+		p := New()
+		p.Add(lib.MustInvoke("multiply", otherRV, big.NewInt(10)))
+
+		c := p.Clone()
+
+		args := c.CommandAt(0).Call().Args()
+		rv, ok := args[0].(*ReturnValue)
+		if !ok {
+			t.Fatalf("Expected *ReturnValue, got %T", args[0])
+		}
+		// Since `other` is not part of p's cloned subtree, the reference is
+		// preserved as-is (not rewired).
+		if rv.command != other.CommandAt(0) {
+			t.Error("Out-of-subtree ReturnValue should point at the original external command")
+		}
+	})
+}
+
+// TestPlannerClone_ConcurrentPlan exercises the independence claim: after
+// Clone(), Plan() may run on the original and the clone from separate
+// goroutines without synchronization. Run under `go test -race` (requires
+// CGO_ENABLED=1) to get real race-detector coverage; without -race this is
+// still a useful regression.
+func TestPlannerClone_ConcurrentPlan(t *testing.T) {
+	testABI := plannerTestABI()
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	lib := NewLibrary(addr, testABI)
+
+	build := func() *Planner {
+		p := New()
+		sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+		doubled := p.Add(lib.MustInvoke("multiply", sum, big.NewInt(2)))
+		p.Add(lib.MustInvoke("multiply", doubled, big.NewInt(10)))
+		return p
+	}
+
+	orig := build()
+	clone := orig.Clone()
+
+	var (
+		wg                    sync.WaitGroup
+		origPlan, clonePlan   *CompiledPlan
+		origErr, cloneErr     error
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		origPlan, origErr = orig.Plan()
+	}()
+	go func() {
+		defer wg.Done()
+		clonePlan, cloneErr = clone.Plan()
+	}()
+	wg.Wait()
+
+	if origErr != nil {
+		t.Fatalf("orig.Plan: %v", origErr)
+	}
+	if cloneErr != nil {
+		t.Fatalf("clone.Plan: %v", cloneErr)
+	}
+	if !equalCompiledPlans(origPlan, clonePlan) {
+		t.Error("Concurrent Plan() on original and clone produced divergent output")
+	}
+}
+
+// equalCompiledPlans compares two CompiledPlans by byte content for equality.
+func equalCompiledPlans(a, b *CompiledPlan) bool {
+	if len(a.Commands) != len(b.Commands) || len(a.State) != len(b.State) {
+		return false
+	}
+	for i := range a.Commands {
+		if !bytes.Equal(a.Commands[i], b.Commands[i]) {
+			return false
+		}
+	}
+	for i := range a.State {
+		if !bytes.Equal(a.State[i], b.State[i]) {
+			return false
+		}
+	}
+	return reflect.DeepEqual(a.Commands, b.Commands) && reflect.DeepEqual(a.State, b.State)
 }
 
 func TestVisibilityAnalysis(t *testing.T) {

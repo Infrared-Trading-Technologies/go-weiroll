@@ -1,5 +1,7 @@
 package weiroll
 
+import "math/big"
+
 // CommandType specifies the type of command operation.
 type CommandType uint8
 
@@ -145,6 +147,117 @@ func (p *Planner) CommandAt(i int) *Command {
 		return nil
 	}
 	return p.commands[i]
+}
+
+// Clone returns a deep copy of the Planner. The clone is independent: calling
+// Plan() on it does not mutate the original, and adding/removing commands on
+// the clone is isolated. ReturnValue, StateValue, and SubplanValue references
+// are rewired to point at the cloned commands and planners. Subplans reachable
+// through SubplanValue or StateValue are cloned recursively (with shared
+// references preserved across the cloned tree).
+//
+// Contracts, ABI methods, and LiteralValue data are treated as immutable and
+// shared with the original. The parent pointer is reset to nil; re-attach via
+// AddSubplan if the clone is meant to be used as a nested planner.
+//
+// Concurrency: the source planner must not be mutated while Clone runs (same
+// convention as every other method on Planner — there is no internal locking).
+// Once Clone returns, the original and the clone are fully independent:
+// operations on each, including Plan, Add, and AddSubplan, may run
+// concurrently from separate goroutines without further synchronization.
+func (p *Planner) Clone() *Planner {
+	ctx := &cloneContext{
+		commands: make(map[*Command]*Command),
+		planners: make(map[*Planner]*Planner),
+	}
+	return ctx.clonePlanner(p)
+}
+
+// cloneContext carries shared maps so that ReturnValue / SubplanValue /
+// StateValue references can be rewired consistently across an entire planner
+// tree, even when sibling subplans cross-reference each other's commands.
+type cloneContext struct {
+	commands map[*Command]*Command
+	planners map[*Planner]*Planner
+}
+
+func (ctx *cloneContext) clonePlanner(p *Planner) *Planner {
+	if p == nil {
+		return nil
+	}
+	if existing, ok := ctx.planners[p]; ok {
+		return existing
+	}
+
+	clone := &Planner{
+		commands: make([]*Command, len(p.commands)),
+		// parent is intentionally nil: the clone is free-standing until the
+		// caller re-attaches it via AddSubplan.
+	}
+	ctx.planners[p] = clone
+
+	// Pass 1: allocate new Command structs and register the mapping so
+	// ReturnValue references encountered during call cloning resolve to the
+	// new pointers (regardless of forward/backward command order or sibling
+	// subplan references).
+	for i, oldCmd := range p.commands {
+		clone.commands[i] = &Command{
+			cmdType:    oldCmd.cmdType,
+			returnSlot: -1, // reset so a fresh Plan() starts from a clean slate
+		}
+		ctx.commands[oldCmd] = clone.commands[i]
+	}
+
+	// Pass 2: clone each Call, rewiring its args.
+	for i, oldCmd := range p.commands {
+		clone.commands[i].call = ctx.cloneCall(oldCmd.call)
+	}
+
+	return clone
+}
+
+func (ctx *cloneContext) cloneCall(c *Call) *Call {
+	if c == nil {
+		return nil
+	}
+	out := &Call{
+		contract:  c.contract,
+		method:    c.method,
+		flags:     c.flags,
+		rawReturn: c.rawReturn,
+	}
+	if c.value != nil {
+		out.value = new(big.Int).Set(c.value)
+	}
+	out.args = make([]Value, len(c.args))
+	for i, arg := range c.args {
+		out.args[i] = ctx.rewireValue(arg)
+	}
+	return out
+}
+
+func (ctx *cloneContext) rewireValue(v Value) Value {
+	switch val := v.(type) {
+	case *LiteralValue:
+		// Immutable byte data — safe to share.
+		return val
+	case *ReturnValue:
+		if newCmd, ok := ctx.commands[val.command]; ok {
+			return &ReturnValue{
+				command: newCmd,
+				abiType: val.abiType,
+				index:   val.index,
+			}
+		}
+		// References a command outside the cloned subtree; preserve as-is.
+		return val
+	case *StateValue:
+		return &StateValue{planner: ctx.clonePlanner(val.planner)}
+	case *SubplanValue:
+		return &SubplanValue{subplanner: ctx.clonePlanner(val.subplanner)}
+	default:
+		return val
+	}
 }
 
 // ForEachCommand iterates over all commands in the planner.
