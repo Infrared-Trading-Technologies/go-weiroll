@@ -114,24 +114,24 @@ func TestCommandEncoderEncodeExtended(t *testing.T) {
 		}
 	})
 
-	t.Run("first 6 args in word 1", func(t *testing.T) {
-		for i := 0; i < 6; i++ {
-			if cmd[5+i] != argSlots[i] {
-				t.Errorf("Word 1 arg %d: expected %d, got %d", i, argSlots[i], cmd[5+i])
+	t.Run("word 1 input bytes are 0xff (VM ignores them)", func(t *testing.T) {
+		for i := 0; i < MaxStandardArgs; i++ {
+			if cmd[5+i] != UnusedSlot {
+				t.Errorf("Word 1 byte %d: expected 0x%02x (unused), got 0x%02x", 5+i, UnusedSlot, cmd[5+i])
 			}
 		}
 	})
 
-	t.Run("remaining args in word 2", func(t *testing.T) {
-		for i := 6; i < len(argSlots); i++ {
-			if cmd[32+(i-6)] != argSlots[i] {
-				t.Errorf("Word 2 arg %d: expected %d, got %d", i, argSlots[i], cmd[32+(i-6)])
+	t.Run("all args in word 2", func(t *testing.T) {
+		for i := 0; i < len(argSlots); i++ {
+			if cmd[32+i] != argSlots[i] {
+				t.Errorf("Word 2 arg %d: expected %d, got %d", i, argSlots[i], cmd[32+i])
 			}
 		}
 	})
 
 	t.Run("word 2 padding", func(t *testing.T) {
-		for i := len(argSlots) - 6; i < 32; i++ {
+		for i := len(argSlots); i < 32; i++ {
 			if cmd[32+i] != UnusedSlot {
 				t.Errorf("Word 2 padding at %d: expected %d, got %d", i, UnusedSlot, cmd[32+i])
 			}

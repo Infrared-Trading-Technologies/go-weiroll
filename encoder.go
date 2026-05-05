@@ -121,8 +121,12 @@ func (e *CommandEncoder) Encode(
 // EncodeExtended produces a 64-byte extended command for 7+ arguments.
 // Format:
 //
-//	Word 1: [selector:4][flags|EXTENDED:1][padding:7][address:20]
+//	Word 1: [selector:4][flags|EXTENDED:1][0xff×6:6][returnSlot:1][address:20]
 //	Word 2: [arg slots padded to 32 bytes with 0xFF]
+//
+// VM._execute reads `indices = commands[++i]` for extended commands, so
+// the input arg specifiers MUST live entirely in Word 2; Word 1's input
+// bytes (5..10) are unused and filled with 0xff.
 func (e *CommandEncoder) EncodeExtended(
 	selector [4]byte,
 	flags CallFlags,
@@ -140,13 +144,11 @@ func (e *CommandEncoder) EncodeExtended(
 	// Byte 4: Flags with EXTENDED bit set
 	cmd[4] = byte(flags | FlagExtendedCommand)
 
-	// Bytes 5-10: First 6 argument slots
+	// Bytes 5-10: VM ignores these for extended commands. Fill with the
+	// end-of-args sentinel so an accidental short-command read also
+	// produces a no-arg call rather than reading garbage slots.
 	for i := 0; i < MaxStandardArgs; i++ {
-		if i < len(argSlots) {
-			cmd[5+i] = argSlots[i]
-		} else {
-			cmd[5+i] = UnusedSlot
-		}
+		cmd[5+i] = UnusedSlot
 	}
 
 	// Byte 11: Return slot
@@ -155,12 +157,10 @@ func (e *CommandEncoder) EncodeExtended(
 	// Bytes 12-31: Contract address
 	copy(cmd[12:32], address.Bytes())
 
-	// Word 2: Remaining argument slots (32 bytes)
-	// Fill with argument slots starting from index 6
+	// Word 2: ALL argument slots (up to 32), padded with 0xff.
 	for i := 0; i < 32; i++ {
-		argIdx := MaxStandardArgs + i
-		if argIdx < len(argSlots) {
-			cmd[32+i] = argSlots[argIdx]
+		if i < len(argSlots) {
+			cmd[32+i] = argSlots[i]
 		} else {
 			cmd[32+i] = UnusedSlot
 		}
@@ -207,13 +207,9 @@ func DecodeCommand(cmd []byte) (
 	flags = CallFlags(cmd[4])
 
 	if flags.IsExtended() && len(cmd) >= ExtendedCommandSize {
-		// Extended command: 6 args in first word + up to 32 in second
+		// Extended command: all up-to-32 args live in Word 2; Word 1's
+		// input-slot bytes (5..10) are unused (see EncodeExtended).
 		argSlots = make([]uint8, 0, MaxExtendedArgs)
-		for i := 0; i < MaxStandardArgs; i++ {
-			if cmd[5+i] != UnusedSlot {
-				argSlots = append(argSlots, cmd[5+i])
-			}
-		}
 		for i := 0; i < 32; i++ {
 			if cmd[32+i] != UnusedSlot {
 				argSlots = append(argSlots, cmd[32+i])

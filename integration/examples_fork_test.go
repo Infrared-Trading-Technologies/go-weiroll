@@ -2,12 +2,14 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"testing"
 	"time"
 
 	weiroll "github.com/branched-services/go-weiroll"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -141,6 +143,35 @@ func setNonceAndGas(t *testing.T, ctx context.Context, client *ethclient.Client,
 	auth.GasLimit = gasLimit
 }
 
+// simulateExecute does a static eth_call on VM.execute and returns the
+// revert error (or nil on success). On revert, the WeirollVM's
+// ExecutionFailed custom error is surfaced inside the error string,
+// including the failing command_index. bind.Transact's receipt-only
+// failure path swallows this; eth_call exposes it.
+func simulateExecute(
+	ctx context.Context,
+	client *ethclient.Client,
+	from, vmAddr common.Address,
+	plan *weiroll.CompiledPlan,
+	value *big.Int,
+) error {
+	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
+	data, err := vmABIParsed.Pack("execute", plan.CommandsAsBytes32(), plan.StateAsBytes())
+	if err != nil {
+		return fmt.Errorf("pack execute: %w", err)
+	}
+	msg := ethereum.CallMsg{
+		From:  from,
+		To:    &vmAddr,
+		Value: value,
+		Data:  data,
+	}
+	if _, err := client.CallContract(ctx, msg, nil); err != nil {
+		return err
+	}
+	return nil
+}
+
 // TestForkCase4_TupleReturnRoundTrip is the on-chain validation of the
 // RawReturn -> TupleHelper.extract -> ReturnValue.As pattern.
 //
@@ -186,22 +217,43 @@ func TestForkCase4_TupleReturnRoundTrip(t *testing.T) {
 	t.Logf("MathLib:      %s", mathAddr.Hex())
 	t.Logf("UniV2 pair:   %s", mainnetUniV2WETHUSDC.Hex())
 
-	// Independent ground truth: directly call getReserves on the pair.
+	// Independent ground truth: raw call + Unpack. bind.BoundContract.Call
+	// misdecodes multi-return ABI outputs as a single tuple; raw Unpack
+	// returns each output element directly.
 	pairABIParsed := weiroll.MustParseABI(uniV2PairABI)
-	pairBound := bind.NewBoundContract(mainnetUniV2WETHUSDC, pairABIParsed, client, client, client)
-	var truthOut []interface{} = []interface{}{new(*big.Int), new(*big.Int), new(uint32)}
-	if err := pairBound.Call(&bind.CallOpts{Context: ctx}, &truthOut, "getReserves"); err != nil {
-		t.Fatalf("direct getReserves: %v", err)
+	getReservesData, err := pairABIParsed.Pack("getReserves")
+	if err != nil {
+		t.Fatalf("pack getReserves: %v", err)
 	}
-	wantReserve0 := *truthOut[0].(**big.Int)
-	wantReserve1 := *truthOut[1].(**big.Int)
+	getReservesRet, err := client.CallContract(ctx, ethereum.CallMsg{
+		To:   &mainnetUniV2WETHUSDC,
+		Data: getReservesData,
+	}, nil)
+	if err != nil {
+		t.Fatalf("call getReserves: %v", err)
+	}
+	unpacked, err := pairABIParsed.Unpack("getReserves", getReservesRet)
+	if err != nil {
+		t.Fatalf("unpack getReserves: %v", err)
+	}
+	if len(unpacked) != 3 {
+		t.Fatalf("getReserves: expected 3 outputs, got %d", len(unpacked))
+	}
+	wantReserve0, ok := unpacked[0].(*big.Int)
+	if !ok {
+		t.Fatalf("reserve0 type: %T", unpacked[0])
+	}
+	wantReserve1, ok := unpacked[1].(*big.Int)
+	if !ok {
+		t.Fatalf("reserve1 type: %T", unpacked[1])
+	}
 	t.Logf("direct reserve0: %s", wantReserve0.String())
 	t.Logf("direct reserve1: %s", wantReserve1.String())
 
 	// Build the weiroll plan using the contract types we want to test.
 	pair := weiroll.NewContract(mainnetUniV2WETHUSDC, pairABIParsed, weiroll.WithStaticCalls())
 	helper := weiroll.NewContract(helperAddr, weiroll.MustParseABI(tupleHelperABI), weiroll.WithStaticCalls())
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 
 	planner := weiroll.New()
 
@@ -418,7 +470,7 @@ func TestForkCase6_SelfBalancePattern(t *testing.T) {
 	weth := weiroll.NewContract(mainnetWETH, weiroll.MustParseABI(wethABI))
 	usdc := weiroll.NewContract(mainnetUSDC, weiroll.MustParseABI(erc20StdABI))
 	router := weiroll.NewContract(mainnetUniV2Router, weiroll.MustParseABI(uniswapV2RouterABI))
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 	aave := weiroll.NewContract(mainnetAaveV3Pool, weiroll.MustParseABI(aaveV3PoolABI))
 
 	wrapAmount := big.NewInt(1e17) // 0.1 ETH
@@ -461,6 +513,12 @@ func TestForkCase6_SelfBalancePattern(t *testing.T) {
 		t.Fatalf("aToken balanceOf before: %v", err)
 	}
 	t.Logf("aUSDC before: %s", aBefore)
+
+	// Pre-simulate to surface revert reasons (bind.Transact would only
+	// give us status=0 with no command index).
+	if err := simulateExecute(ctx, client, from, vmAddr, plan, wrapAmount); err != nil {
+		t.Fatalf("execute simulation reverted: %v", err)
+	}
 
 	// Execute on chain.
 	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
@@ -534,7 +592,7 @@ func TestForkCase3_AaveSupplyAndATokenRead(t *testing.T) {
 	aToken := weiroll.NewContract(mainnetAUSDC, weiroll.MustParseABI(erc20StdABI))
 	router := weiroll.NewContract(mainnetUniV2Router, weiroll.MustParseABI(uniswapV2RouterABI))
 	aave := weiroll.NewContract(mainnetAaveV3Pool, weiroll.MustParseABI(aaveV3PoolABI))
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 
 	wrapAmount := big.NewInt(1e17) // 0.1 ETH
 	maxApprove := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
@@ -561,6 +619,11 @@ func TestForkCase3_AaveSupplyAndATokenRead(t *testing.T) {
 	plan, err := planner.Plan()
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
+	}
+
+	// Pre-simulate to surface the failing command index on revert.
+	if err := simulateExecute(ctx, client, from, vmAddr, plan, wrapAmount); err != nil {
+		t.Fatalf("execute simulation reverted: %v", err)
 	}
 
 	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
@@ -656,6 +719,36 @@ const npmTransferABI = `[
 //
 // Setup: send 1 ETH with the execute call, expect the user wallet to
 // hold a UniV3 LP NFT after the tx mines.
+//
+// Pattern reference — "inline-ETH + delegatecall adapter":
+//
+// Two recipe traits combine here that don't elsewhere in the suite:
+//
+//  1. The user funds the recipe by attaching ETH to execute() (auth.Value
+//     != 0), so a downstream WETH.deposit().WithValue(...) can wrap it
+//     without a prior funding tx. Cases 6 and 3 use the same UX, but
+//     only call pure helpers (registered via NewContract / CALL), so
+//     CALLVALUE never reaches a nonpayable dispatcher.
+//
+//  2. NPM.mint takes a single MintParams struct of 11 primitive fields,
+//     and go-weiroll's encoder has no tuple-flattening path — every
+//     argument occupies its own state slot. The standard fix is an
+//     adapter contract (MintAdapter) that exposes mintFlat(11 primitive
+//     args) and rebuilds the struct internally. The adapter must be
+//     delegatecalled so msg.sender to NPM is the VM (which holds the
+//     WETH/USDC approvals and receives the LP NFT).
+//
+// Combining (1) and (2) means CALLVALUE is preserved from the outer
+// execute() through the DELEGATECALL into MintAdapter. Solidity's
+// nonpayable dispatcher would revert with empty returndata (visible as
+// ExecutionFailed(_, _, "Unknown")). MintAdapter therefore declares
+// mintFlat as `external payable` and uses the `address(this) != _SELF`
+// guard to reject direct CALLs that could lock ETH in the adapter
+// singleton. See MintAdapter.sol for the full convention.
+//
+// The pre-funded variant (auth.Value == 0, WETH transferred to VM
+// out-of-band) sidesteps both points — see TestMainnetForkUniswapV2Swap
+// and TestMainnetForkMultiHopSwap for that pattern.
 func TestForkCase7_AdvancedComposition(t *testing.T) {
 	pk, err := crypto.HexToECDSA(testPrivateKey)
 	if err != nil {
@@ -703,9 +796,9 @@ func TestForkCase7_AdvancedComposition(t *testing.T) {
 	weth := weiroll.NewContract(mainnetWETH, weiroll.MustParseABI(wethABI))
 	usdc := weiroll.NewContract(mainnetUSDC, weiroll.MustParseABI(erc20StdABI))
 	uniV2 := weiroll.NewContract(mainnetUniV2Router, weiroll.MustParseABI(uniswapV2RouterABI))
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 	adapter := weiroll.NewLibrary(adapterAddr, weiroll.MustParseABI(mintAdapterABI))
-	helper := weiroll.NewLibrary(helperAddr, weiroll.MustParseABI(tupleHelperABI))
+	helper := weiroll.NewContract(helperAddr, weiroll.MustParseABI(tupleHelperABI))
 	npmCtx := weiroll.NewContract(npm, weiroll.MustParseABI(npmTransferABI))
 
 	wrapAmount := big.NewInt(1e18)
@@ -762,6 +855,11 @@ func TestForkCase7_AdvancedComposition(t *testing.T) {
 	if err := npmBound.Call(&bind.CallOpts{Context: ctx},
 		&[]interface{}{&nftBefore}, "balanceOf", user); err != nil {
 		t.Fatalf("NPM.balanceOf(user) before: %v", err)
+	}
+
+	// Pre-simulate to surface the failing command index on revert.
+	if err := simulateExecute(ctx, client, from, vmAddr, plan, wrapAmount); err != nil {
+		t.Fatalf("execute simulation reverted: %v", err)
 	}
 
 	// Execute. We need to send 1 ETH alongside (auth.Value).
