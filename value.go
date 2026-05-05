@@ -50,10 +50,16 @@ func (v *LiteralValue) Data() []byte {
 }
 
 // ReturnValue represents the output of a previously added command.
+//
+// A ReturnValue is opaque on the Go side: it cannot be indexed, split,
+// or operated on arithmetically. To manipulate it, append another
+// command (typically a helper-library call) that consumes it. To
+// reinterpret it as a different ABI type without an extra command,
+// use ReturnValue.As — useful for off-chain casts between types with
+// the same slot encoding (e.g., bytes32 -> uint256).
 type ReturnValue struct {
 	command *Command
 	abiType abi.Type
-	index   int // For multi-return functions, index into outputs
 }
 
 func (v *ReturnValue) isValue() {}
@@ -76,6 +82,66 @@ func (v *ReturnValue) Data() []byte {
 // Command returns the command that produces this return value.
 func (v *ReturnValue) Command() *Command {
 	return v.command
+}
+
+// As returns a new ReturnValue that points at the same return slot but
+// is typed as abiType. This is an off-chain reinterpretation only — the
+// VM stores the same bytes; only the Go-side type metadata changes.
+//
+// The cast must be encoding-compatible: both source and destination
+// must be either static (32-byte slot) or both dynamic (length-prefixed
+// bytes slot). Mixing static and dynamic types is rejected because the
+// slot encodings differ.
+//
+// Common uses:
+//   - bytes32 -> uint256 / address (all static, 32-byte slot)
+//   - bytes -> uint256[] / a tuple-shaped dynamic type (all dynamic)
+//
+// Use this to skip an on-chain no-op cast (e.g., a deployed
+// bytes32-to-uint256 helper) when the bytes already have the right
+// shape. For real numeric conversions or unpacking, you still need a
+// Solidity helper.
+func (v *ReturnValue) As(abiType abi.Type) (*ReturnValue, error) {
+	if isDynamicType(v.abiType) != isDynamicType(abiType) {
+		return nil, &TypeMismatchError{
+			Expected: v.abiType.String(),
+			Got:      abiType.String(),
+		}
+	}
+	return &ReturnValue{
+		command: v.command,
+		abiType: abiType,
+	}, nil
+}
+
+// MustAs is like As but panics on incompatible casts. Use only when the
+// cast is statically known to be valid.
+func (v *ReturnValue) MustAs(abiType abi.Type) *ReturnValue {
+	rv, err := v.As(abiType)
+	if err != nil {
+		panic(err)
+	}
+	return rv
+}
+
+// AsType is like As but accepts a type string (e.g., "uint256",
+// "address", "bytes").
+func (v *ReturnValue) AsType(typeStr string) (*ReturnValue, error) {
+	t, err := abi.NewType(typeStr, "", nil)
+	if err != nil {
+		return nil, &EncodingError{Value: v, Err: err}
+	}
+	return v.As(t)
+}
+
+// MustAsType is like AsType but panics on incompatible casts or invalid
+// type strings.
+func (v *ReturnValue) MustAsType(typeStr string) *ReturnValue {
+	rv, err := v.AsType(typeStr)
+	if err != nil {
+		panic(err)
+	}
+	return rv
 }
 
 // StateValue represents the current planner state array.

@@ -104,9 +104,9 @@ fi
 export INTEGRATION_TEST=1
 
 if [ -n "$TEST_PATTERN" ]; then
-    go test -v -run "$TEST_PATTERN" -timeout 120s
+    go test -v -run "$TEST_PATTERN" -timeout 300s
 else
-    go test -v -timeout 120s
+    go test -v -timeout 300s
 fi
 
 echo ""

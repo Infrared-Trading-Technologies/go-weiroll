@@ -52,6 +52,9 @@ func New(opts ...PlannerOption) *Planner {
 
 // Add adds a function call to the plan and returns its return value (if any).
 // Returns nil if the function has no return value.
+//
+// The returned *ReturnValue is typed as the call's effective return type:
+// the first ABI output, or bytes if RawReturn was set on the call.
 func (p *Planner) Add(call *Call) *ReturnValue {
 	cmd := &Command{
 		call:       call,
@@ -66,8 +69,7 @@ func (p *Planner) Add(call *Call) *ReturnValue {
 
 	return &ReturnValue{
 		command: cmd,
-		abiType: *call.ReturnType(),
-		index:   0,
+		abiType: *call.EffectiveReturnType(),
 	}
 }
 
@@ -100,8 +102,7 @@ func (p *Planner) AddSubplan(call *Call, subplanner *Planner) (*ReturnValue, err
 
 	return &ReturnValue{
 		command: cmd,
-		abiType: *call.ReturnType(),
-		index:   0,
+		abiType: *call.EffectiveReturnType(),
 	}, nil
 }
 
@@ -246,7 +247,6 @@ func (ctx *cloneContext) rewireValue(v Value) Value {
 			return &ReturnValue{
 				command: newCmd,
 				abiType: val.abiType,
-				index:   val.index,
 			}
 		}
 		// References a command outside the cloned subtree; preserve as-is.
@@ -296,7 +296,7 @@ func (p *Planner) Plan(opts ...PlanOption) (*CompiledPlan, error) {
 		if lastUsage, used := visibility[cmd]; used {
 			isDynamic := false
 			if cmd.call.HasReturnValue() {
-				isDynamic = isDynamicType(*cmd.call.ReturnType())
+				isDynamic = isDynamicType(*cmd.call.EffectiveReturnType())
 			}
 			slot, err := state.allocateReturn(cmd, lastUsage, isDynamic)
 			if err != nil {
@@ -311,11 +311,23 @@ func (p *Planner) Plan(opts ...PlanOption) (*CompiledPlan, error) {
 			return nil, &PlanError{CommandIndex: i, Method: cmd.call.method.Name, Err: err}
 		}
 
-		// Determine return slot
+		// Determine return slot.
+		//
+		// Producer-side dynamic flag rules:
+		//   - Naturally-dynamic returns (uint256[], string, bytes) need
+		//     the flag so the VM's writeOutputs takes the variable-
+		//     length branch, which masks the slot byte before storing.
+		//   - RawReturn (FlagTupleReturn) is handled by writeTuple,
+		//     which uses the slot byte UNMASKED (CommandBuilder.sol
+		//     line 151: `state[idx]`). Setting the flag there would
+		//     index out of bounds. The consumer side still gets the
+		//     flag via the ReturnValue's bytes typing, which is what
+		//     makes downstream reads dynamic.
 		returnSlot := uint8(NoReturnSlot)
 		if cmd.returnSlot >= 0 {
 			returnSlot = uint8(cmd.returnSlot)
-			if cmd.call.HasReturnValue() && isDynamicType(*cmd.call.ReturnType()) {
+			if cmd.call.HasReturnValue() && !cmd.call.rawReturn &&
+				isDynamicType(*cmd.call.ReturnType()) {
 				returnSlot |= DynamicSlotFlag
 			}
 		}

@@ -6,6 +6,16 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 )
 
+// bytesABIType is the ABI type used for RawReturn return slots, where
+// the VM stores the entire returndata as a length-prefixed bytes blob.
+var bytesABIType = func() abi.Type {
+	t, err := abi.NewType("bytes", "", nil)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}()
+
 // Call represents a pending contract call that can be added to a Planner.
 // Call is immutable - modifier methods return new instances.
 type Call struct {
@@ -82,10 +92,27 @@ func (c *Call) HasReturnValue() bool {
 	return len(c.method.Outputs) > 0
 }
 
-// ReturnType returns the ABI type of the first return value, if any.
+// ReturnType returns the ABI type of the first ABI-declared return value,
+// if any. This reflects the contract ABI as written; it does NOT account
+// for RawReturn. Use EffectiveReturnType for the type actually stored in
+// the weiroll return slot.
 func (c *Call) ReturnType() *abi.Type {
 	if len(c.method.Outputs) == 0 {
 		return nil
+	}
+	return &c.method.Outputs[0].Type
+}
+
+// EffectiveReturnType returns the ABI type of the value that the weiroll
+// VM stores in the return slot for this call. When RawReturn is set the
+// VM captures the entire returndata as a length-prefixed bytes blob, so
+// this returns bytes (dynamic). Otherwise it returns the first ABI output.
+func (c *Call) EffectiveReturnType() *abi.Type {
+	if !c.HasReturnValue() {
+		return nil
+	}
+	if c.rawReturn {
+		return &bytesABIType
 	}
 	return &c.method.Outputs[0].Type
 }
@@ -119,8 +146,14 @@ func (c *Call) Static() *Call {
 	return clone
 }
 
-// RawReturn wraps the return value as raw bytes.
-// This is useful for capturing multiple return values or complex types.
+// RawReturn captures the entire returndata as a length-prefixed bytes
+// blob in the return slot. Use this for methods with multiple ABI
+// return values (tuples) so a downstream extraction helper can read
+// individual fields. After RawReturn, the *ReturnValue produced by
+// Planner.Add is typed as bytes (dynamic) and pipes correctly into any
+// argument expecting bytes; reinterpret it with ReturnValue.As if the
+// extractor expects a different dynamic type, or chain a typed cast
+// helper for static fields.
 //
 // Returns a new Call with the tuple return flag set.
 func (c *Call) RawReturn() *Call {

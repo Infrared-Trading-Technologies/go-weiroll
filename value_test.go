@@ -292,7 +292,6 @@ func TestReturnValue(t *testing.T) {
 	rv := &ReturnValue{
 		command: cmd,
 		abiType: abiType,
-		index:   0,
 	}
 
 	t.Run("IsDynamic", func(t *testing.T) {
@@ -325,7 +324,6 @@ func TestReturnValueDynamic(t *testing.T) {
 	rv := &ReturnValue{
 		command: nil,
 		abiType: abiType,
-		index:   0,
 	}
 
 	if !rv.IsDynamic() {
