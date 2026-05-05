@@ -167,7 +167,7 @@ The planner automatically optimizes state usage:
 
 ## Versioning
 
-This project follows [Semantic Versioning](https://semver.org/). See the [releases](https://github.com/branched-services/go-weiroll/releases) for available versions.
+This project follows [Semantic Versioning](https://semver.org/). See the [releases](https://github.com/branched-services/go-weiroll/releases) for available versions, and [`docs/releasing.md`](./docs/releasing.md) for the release workflow.
 
 ## Testing
 
