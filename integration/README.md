@@ -31,36 +31,37 @@ This will:
 
 ## Available Tests
 
-### TestMathValueChaining
-Basic value chaining test on fresh Anvil (no fork needed): `(5 + 3) * 10 - 20 = 60`
+### Basic / non-fork
 
-### TestMainnetForkWETH
-Tests against real mainnet WETH contract:
-- Wrap ETH → WETH via `deposit()`
-- Verifies balance after wrap
+- **TestMathValueChaining** — value chaining on fresh Anvil: `(5 + 3) * 10 - 20 = 60`.
 
-### TestMainnetForkWETHWrapUnwrap
-Tests wrap + partial unwrap in a single transaction using real mainnet WETH:
-1. `deposit()` - wrap 1 ETH to WETH
-2. `withdraw()` - unwrap 0.3 ETH back
+### Mainnet fork — pre-funded VM (`auth.Value == 0`)
 
-Key insight: `deposit()` and `withdraw()` have **no return values**, demonstrating how weiroll handles void functions.
+- **TestMainnetForkWETH** — `WETH.deposit` against real WETH; verifies balance.
+- **TestMainnetForkWETHWrapUnwrap** — wrap + partial unwrap in one tx. Demonstrates void-return functions.
+- **TestMainnetForkUniswapV2Swap** — real WETH → USDC swap via the actual UniV2 router.
+- **TestMainnetForkMultiHopSwap** — flagship: WETH → USDC → DAI with the second swap consuming the chained amount from the first. Single atomic tx.
 
-### TestMainnetForkUniswapV2Swap
-Tests a real WETH → USDC swap on forked mainnet using the actual Uniswap V2 Router at `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D`.
+### Mainnet fork — case-numbered worked examples
 
-### TestMainnetForkMultiHopSwap
-**The flagship test!** Demonstrates chained swaps with real contracts:
-1. Approve router for WETH
-2. Swap WETH → USDC on real Uniswap V2
-3. Extract USDC output amount using MathLib
-4. Approve router for USDC  
-5. Swap USDC → DAI using **the chained output from step 2**
+These mirror `../examples/01..07` and are the reference patterns for writing real recipes.
 
-This demonstrates the core weiroll value proposition: using return values from one call as inputs to subsequent calls, all executed atomically.
+- **TestForkCase1_BalanceOfTransfer** — read VM balance, transfer that amount.
+- **TestForkCase4_TupleReturnRoundTrip** — `RawReturn` + `TupleHelper.extract` + `MustAsType` to read individual fields out of a multi-return ABI output (UniV2 pair `getReserves`).
+- **TestForkCase6_SelfBalancePattern** — inline ETH + pure helpers: wrap, swap, `extractLastElement`, approve Aave, supply. The "self-balance" probe is a no-op visibility prod.
+- **TestForkCase3_AaveSupplyAndATokenRead** — same shape as case 6, then reads aUSDC.balanceOf(VM) post-supply and pipes it into a downstream consumer.
+- **TestForkCase7_AdvancedComposition** — the "everything" recipe: inline ETH wrap, swap, mint a UniV3 LP NFT via a delegatecall adapter, extract the tokenId, ship the NFT to the user. Documents the "inline-ETH + delegatecall adapter" convention (`payable` + `_SELF` guard on the adapter).
+
+### Three patterns the fork tests demonstrate
+
+| Pattern | Tests | Notes |
+|---|---|---|
+| Pre-funded VM, value=0 | UniswapV2Swap, MultiHopSwap, Case4, Case1 | Cleanest contract surface; multi-tx UX or pre-existing balances. |
+| Inline ETH, only pure helpers | Case6, Case3 | Pure helpers must register as `NewContract` (CALL), not `NewLibrary`. |
+| Inline ETH + must-delegatecall adapter | Case7 | Adapter must be `external payable` with the `address(this) != _SELF` guard. |
 
 ```bash
-./run_test.sh --fork --rpc $MAINNET_RPC_URL --test TestMainnetForkMultiHopSwap
+./run_test.sh --fork --rpc $MAINNET_RPC_URL --test TestForkCase7_AdvancedComposition
 ```
 
 ## Real Mainnet Contracts Used
@@ -74,8 +75,11 @@ This demonstrates the core weiroll value proposition: using return values from o
 
 ## Contracts (Deployed by Tests)
 
-- `contracts/VM.sol` - Weiroll VM implementation
-- `contracts/MathLib.sol` - Math operations + `extractLastElement()` helper
+- `contracts/VM.sol` — Weiroll VM (the abstract `VM` + concrete `WeirollVM`).
+- `contracts/CommandBuilder.sol` — input-encoding + output-writing library used by the VM.
+- `contracts/MathLib.sol` — pure math helpers + `extractLastElement(uint256[])`. Registered with `NewContract` (CALL).
+- `contracts/TupleHelper.sol` — `extract(bytes,uint256) → bytes32` for decoding `RawReturn` blobs. Registered with `NewContract`.
+- `contracts/MintAdapter.sol` — flattens UniV3 NPM `mint(MintParams)` into 11 primitive args so weiroll can pipe individual values in. Registered with `NewLibrary` (DELEGATECALL); marked `external payable` with an `address(this) != _SELF` direct-call guard. See its top-of-file docs for the full convention.
 
 ## Manual Testing
 
@@ -105,14 +109,6 @@ Step 3: swapExactTokensForTokens(output, ...) → uses result from step 2!
 ```
 
 All three operations execute atomically in a single transaction.
-forge build
-
-# In one terminal, start Anvil
-anvil --port 8545
-
-# In another terminal, run tests
-INTEGRATION_TEST=1 go test -v -run TestMathValueChaining
-```
 
 ## Understanding the Output
 
@@ -130,12 +126,9 @@ Command[2]: 0x3ef5e445000300ffffffffff...  # subtract(result, 20)
 Transaction successful! Gas used: 52476
 ```
 
-## Extending the Tests
+## Adding a new fork test
 
-To test with real protocols (like Uniswap V2), you would:
-1. Fork mainnet with Anvil: `anvil --fork-url $RPC_URL`
-2. Use real contract addresses
-3. Fund your test account with tokens
-4. Execute the swap plan
-
-See `../examples/uniswap-v2-swap/` for an example plan (without execution).
+1. Add the test to `examples_fork_test.go` and gate it with `skipUnlessFork(t)`.
+2. Decide your funding pattern (pre-funded vs inline ETH) — see the patterns table above.
+3. Pick `NewLibrary` vs `NewContract` per the rule in the top-level [README](../README.md#contract-types). For helpers that must delegate but the plan also carries `msg.value`, use the `MintAdapter` convention (`external payable` + `_SELF` guard).
+4. Before `bind.Transact`, call `simulateExecute` (defined at the top of `examples_fork_test.go`) so a revert surfaces the failing command index + reason via the VM's `ExecutionFailed` custom error. Without it, `bind.Transact` only reports `status=0 gas=N`.

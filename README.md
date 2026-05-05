@@ -38,15 +38,18 @@ func main() {
     mathABI := weiroll.MustParseABI(mathABIJSON)
     tokenABI := weiroll.MustParseABI(tokenABIJSON)
 
-    // Wrap contracts
-    mathLib := weiroll.NewLibrary(mathLibAddr, mathABI)    // DELEGATECALL
+    // Wrap contracts. Pure/view helpers don't need VM context — use
+    // NewContract (CALL). NewLibrary (DELEGATECALL) is only for helpers
+    // that must act AS the VM (msg.sender to downstream calls = VM,
+    // address(this) = VM). See "Contract Types" for the full rule.
+    math := weiroll.NewContract(mathLibAddr, mathABI)      // CALL
     token := weiroll.NewContract(tokenAddr, tokenABI)      // CALL
 
     // Build plan
     planner := weiroll.New()
 
-    sum := planner.Add(mathLib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
-    product := planner.Add(mathLib.MustInvoke("multiply", sum, big.NewInt(10)))
+    sum := planner.Add(math.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+    product := planner.Add(math.MustInvoke("multiply", sum, big.NewInt(10)))
     planner.Add(token.MustInvoke("transfer", recipient, product))
 
     // Compile
@@ -65,33 +68,37 @@ func main() {
 
 ### Contract Types
 
-- **Library**: Contracts called via DELEGATECALL, executing in the VM's context
-- **External**: Contracts called via CALL (or STATICCALL with options)
+- **Library** (`NewLibrary`): DELEGATECALL. Code runs in the VM's storage/context — `address(this)` is the VM, `msg.sender` to downstream calls is the VM, ERC-20 approvals + balances are the VM's.
+- **External** (`NewContract`): CALL. The target gets its own frame.
 
 ```go
-// Library contract (DELEGATECALL)
-lib := weiroll.NewLibrary(addr, abi)
-
-// External contract (CALL)
-contract := weiroll.NewContract(addr, abi)
-
-// External contract with STATICCALL default
-readOnly := weiroll.NewContract(addr, abi, weiroll.WithStaticCalls())
+lib := weiroll.NewLibrary(addr, abi)                       // DELEGATECALL
+contract := weiroll.NewContract(addr, abi)                 // CALL
+readOnly := weiroll.NewContract(addr, abi, weiroll.WithStaticCalls()) // STATICCALL default
 ```
+
+**Picking between them — gotcha worth knowing.** DELEGATECALL preserves `CALLVALUE` from the outer `execute()` frame. If your plan ever runs with `msg.value > 0` (e.g. a `WETH.deposit().WithValue(...)` command), Solidity's nonpayable dispatcher on every `pure`/`view`/default-mutability function in a delegatecall target reverts with empty data — the VM surfaces that as `ExecutionFailed(_, _, "Unknown")`.
+
+Rule of thumb:
+
+- Pure/view helpers (math, decoders, formatters) → `NewContract`. They don't need VM context, and CALL keeps their frame at `msg.value = 0` so the dispatcher check passes.
+- Helpers that must act AS the VM (e.g. an adapter calling a router with the VM's approvals) → `NewLibrary`, and mark the target function `external payable` with an `address(this) != _SELF` direct-call guard. See `integration/contracts/MintAdapter.sol` for the canonical pattern.
 
 ### Call Modifiers
 
-```go
-call := contract.MustInvoke("method", args...)
+Modifiers return a new `*Call`; chain them rather than calling on a stored value.
 
-// Send ETH with call
-call.WithValue(big.NewInt(1e18))
+```go
+// Send ETH with the call
+planner.Add(weth.MustInvoke("deposit").WithValue(big.NewInt(1e18)))
 
 // Force STATICCALL
-call.Static()
+planner.Add(token.MustInvoke("balanceOf", who).Static())
 
-// Wrap multi-return as bytes
-call.RawReturn()
+// Capture full returndata as bytes (for multi-return / struct-shaped returns).
+// The resulting *ReturnValue is typed as `bytes`; use .As/.MustAs to retype
+// downstream when piping into a typed argument.
+raw := planner.Add(adapter.MustInvoke("mintFlat", ...).RawReturn())
 ```
 
 ### Value Types
@@ -111,6 +118,12 @@ weiroll.Bytes([]byte{1, 2, 3})
 // Return values from previous commands
 sum := planner.Add(math.MustInvoke("add", 1, 2))
 planner.Add(math.MustInvoke("multiply", sum, 3))  // uses sum
+
+// Retype a return value off-chain between encoding-compatible types
+// (bytes32 → uint256, bytes → uint256[], …). Rejects mixing static and
+// dynamic types since their slot encodings differ.
+tokenIdB32 := planner.Add(helper.MustInvoke("extract", raw, big.NewInt(0)))
+tokenId := tokenIdB32.MustAsType("uint256")
 ```
 
 ### Plan Options
@@ -133,9 +146,11 @@ Commands are encoded as 32-byte (standard) or 64-byte (extended for >6 args) pac
 
 **Extended (>6 args):**
 ```
-Word 1: [selector:4][flags|0x40:1][padding:7][address:20]
-Word 2: [arg slots padded to 32 bytes]
+Word 1: [selector:4][flags|0x80:1][0xff×6:6][return:1][address:20]
+Word 2: [up to 32 arg slots, 0xff-padded]
 ```
+
+The VM reads `indices = commands[i+1]` for extended commands — Word 1's input bytes are not used for arg routing and are filled with `0xff`. Flag bits: `0x80 = EXTENDED`, `0x40 = TUPLE_RETURN` (RawReturn), `0x03` mask = call type (`0x00` DELEGATECALL, `0x01` CALL, `0x02` STATICCALL, `0x03` CALL_WITH_VALUE).
 
 ## State Management
 
@@ -157,12 +172,21 @@ This project follows [Semantic Versioning](https://semver.org/). See the [releas
 ## Testing
 
 ```bash
+# Unit tests (no chain needed)
 go test -v ./...
+
+# Integration tests against a fresh Anvil
+./integration/run_test.sh
+
+# Integration tests against an Anvil mainnet fork (real WETH, Uniswap, Aave, NPM)
+./integration/run_test.sh --fork --rpc "$MAINNET_RPC_URL"
 ```
+
+The fork tests under `integration/examples_fork_test.go` double as worked examples for the patterns above (pre-funded VM, inline-ETH + pure helpers, inline-ETH + delegatecall adapter). See [`integration/README.md`](./integration/README.md) for the test inventory.
 
 ## Examples
 
-See the [examples](./examples) directory for more detailed usage examples.
+See the [examples](./examples) directory for usage examples organized by case number (01_simple_return through 07_advanced_composition).
 
 ## License
 
