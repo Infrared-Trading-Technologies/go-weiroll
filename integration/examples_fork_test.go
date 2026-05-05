@@ -603,3 +603,196 @@ func TestForkCase3_AaveSupplyAndATokenRead(t *testing.T) {
 	}
 }
 
+const mintAdapterABI = `[
+	{
+		"name":"mintFlat","type":"function","stateMutability":"nonpayable",
+		"inputs":[
+			{"name":"token0","type":"address"},
+			{"name":"token1","type":"address"},
+			{"name":"fee","type":"uint24"},
+			{"name":"tickLower","type":"int24"},
+			{"name":"tickUpper","type":"int24"},
+			{"name":"amount0Desired","type":"uint256"},
+			{"name":"amount1Desired","type":"uint256"},
+			{"name":"amount0Min","type":"uint256"},
+			{"name":"amount1Min","type":"uint256"},
+			{"name":"recipient","type":"address"},
+			{"name":"deadline","type":"uint256"}
+		],
+		"outputs":[
+			{"name":"tokenId","type":"uint256"},
+			{"name":"liquidity","type":"uint128"},
+			{"name":"amount0","type":"uint256"},
+			{"name":"amount1","type":"uint256"}
+		]
+	}
+]`
+
+const npmTransferABI = `[
+	{
+		"name":"transferFrom","type":"function","stateMutability":"nonpayable",
+		"inputs":[
+			{"name":"from","type":"address"},
+			{"name":"to","type":"address"},
+			{"name":"tokenId","type":"uint256"}
+		],
+		"outputs":[]
+	},
+	{
+		"name":"balanceOf","type":"function","stateMutability":"view",
+		"inputs":[{"name":"owner","type":"address"}],
+		"outputs":[{"name":"","type":"uint256"}]
+	}
+]`
+
+// TestForkCase7_AdvancedComposition runs examples/07_advanced_composition
+// end-to-end on a mainnet fork. It exercises three "hard to get" return
+// values in one tx:
+//
+//   - swap result (uint256[]) extracted via MathLib.extractLastElement
+//   - mint return blob (bytes) captured via .RawReturn()
+//   - tokenId (uint256) extracted via TupleHelper + .As, then piped
+//     into NPM.transferFrom to ship the LP NFT to the user
+//
+// Setup: send 1 ETH with the execute call, expect the user wallet to
+// hold a UniV3 LP NFT after the tx mines.
+func TestForkCase7_AdvancedComposition(t *testing.T) {
+	pk, err := crypto.HexToECDSA(testPrivateKey)
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	client, auth, from := skipUnlessFork(t)
+	ctx := context.Background()
+
+	// Deploy: VM, MathLib, TupleHelper, MintAdapter.
+	setNonceAndGas(t, ctx, client, auth, from, 3_000_000)
+	vmAddr, err := deployContract(ctx, client, auth, pk, "WeirollVM")
+	if err != nil {
+		t.Fatalf("deploy WeirollVM: %v", err)
+	}
+	t.Logf("WeirollVM:    %s", vmAddr.Hex())
+
+	setNonceAndGas(t, ctx, client, auth, from, 2_000_000)
+	mathAddr, err := deployContract(ctx, client, auth, pk, "MathLib")
+	if err != nil {
+		t.Fatalf("deploy MathLib: %v", err)
+	}
+	t.Logf("MathLib:      %s", mathAddr.Hex())
+
+	setNonceAndGas(t, ctx, client, auth, from, 2_000_000)
+	helperAddr, err := deployContract(ctx, client, auth, pk, "TupleHelper")
+	if err != nil {
+		t.Fatalf("deploy TupleHelper: %v", err)
+	}
+	t.Logf("TupleHelper:  %s", helperAddr.Hex())
+
+	setNonceAndGas(t, ctx, client, auth, from, 2_000_000)
+	adapterAddr, err := deployContract(ctx, client, auth, pk, "MintAdapter")
+	if err != nil {
+		t.Fatalf("deploy MintAdapter: %v", err)
+	}
+	t.Logf("MintAdapter:  %s", adapterAddr.Hex())
+
+	// Beneficiary of the LP NFT — distinct from `from` so the assertion
+	// is meaningful even if `from` already holds Uniswap positions.
+	user := common.HexToAddress("0xCAFEBABE00000000000000000000000000000007")
+
+	npm := common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88")
+
+	// Build the same plan as examples/07_advanced_composition.
+	weth := weiroll.NewContract(mainnetWETH, weiroll.MustParseABI(wethABI))
+	usdc := weiroll.NewContract(mainnetUSDC, weiroll.MustParseABI(erc20StdABI))
+	uniV2 := weiroll.NewContract(mainnetUniV2Router, weiroll.MustParseABI(uniswapV2RouterABI))
+	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	adapter := weiroll.NewLibrary(adapterAddr, weiroll.MustParseABI(mintAdapterABI))
+	helper := weiroll.NewLibrary(helperAddr, weiroll.MustParseABI(tupleHelperABI))
+	npmCtx := weiroll.NewContract(npm, weiroll.MustParseABI(npmTransferABI))
+
+	wrapAmount := big.NewInt(1e18)
+	swapAmount := new(big.Int).Div(wrapAmount, big.NewInt(2))
+	mintWeth := new(big.Int).Sub(wrapAmount, swapAmount)
+	deadline := big.NewInt(time.Now().Unix() + 3600)
+	maxApprove := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	planner := weiroll.New()
+	planner.Add(weth.MustInvoke("deposit").WithValue(wrapAmount))
+	planner.Add(weth.MustInvoke("approve", mainnetUniV2Router, maxApprove))
+	swapResult := planner.Add(uniV2.MustInvoke(
+		"swapExactTokensForTokens",
+		swapAmount, big.NewInt(0),
+		[]common.Address{mainnetWETH, mainnetUSDC},
+		vmAddr, deadline,
+	))
+	usdcOut := planner.Add(math.MustInvoke("extractLastElement", swapResult))
+	planner.Add(weth.MustInvoke("approve", npm, maxApprove))
+	planner.Add(usdc.MustInvoke("approve", npm, maxApprove))
+
+	mintRaw := planner.Add(adapter.MustInvoke(
+		"mintFlat",
+		mainnetUSDC, mainnetWETH,
+		big.NewInt(500),
+		big.NewInt(-887220), big.NewInt(887220),
+		usdcOut,           // pipe from swap result
+		mintWeth,          // literal we kept
+		big.NewInt(0), big.NewInt(0),
+		vmAddr, deadline,
+	).RawReturn())
+
+	tokenIdB32 := planner.Add(helper.MustInvoke("extract", mintRaw, big.NewInt(0)))
+	tokenId := tokenIdB32.MustAsType("uint256")
+	planner.Add(npmCtx.MustInvoke("transferFrom", vmAddr, user, tokenId))
+
+	plan, err := planner.Plan()
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	t.Logf("plan: %d commands, %d state slots", len(plan.Commands), len(plan.State))
+
+	// Producer-slot regression check: mintFlat command (index 6) MUST
+	// have a clean return-slot byte. If it gains the dynamic flag,
+	// writeTuple goes out of bounds.
+	_, _, _, mintProdSlot, _, _ := weiroll.DecodeCommand(plan.Commands[6])
+	if mintProdSlot&weiroll.DynamicSlotFlag != 0 {
+		t.Fatalf("mintFlat return slot byte must be clean for tuple-return; got 0x%02x", mintProdSlot)
+	}
+
+	// Pre-balance check: the user owns no NPM NFTs before this tx.
+	npmBound := bind.NewBoundContract(npm, weiroll.MustParseABI(npmTransferABI), client, client, client)
+	var nftBefore *big.Int
+	if err := npmBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&nftBefore}, "balanceOf", user); err != nil {
+		t.Fatalf("NPM.balanceOf(user) before: %v", err)
+	}
+
+	// Execute. We need to send 1 ETH alongside (auth.Value).
+	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
+	vmBound := bind.NewBoundContract(vmAddr, vmABIParsed, client, client, client)
+	setNonceAndGas(t, ctx, client, auth, from, 3_000_000)
+	auth.Value = wrapAmount
+	tx, err := vmBound.Transact(auth, "execute", plan.CommandsAsBytes32(), plan.StateAsBytes())
+	if err != nil {
+		t.Fatalf("VM.execute submit: %v", err)
+	}
+	receipt, err := bind.WaitMined(ctx, client, tx)
+	if err != nil {
+		t.Fatalf("WaitMined execute: %v", err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		t.Fatalf("execute reverted: status=%d gas=%d txhash=%s",
+			receipt.Status, receipt.GasUsed, receipt.TxHash.Hex())
+	}
+	t.Logf("execute gas used: %d", receipt.GasUsed)
+
+	// Verify: user now owns exactly one more LP NFT than before.
+	var nftAfter *big.Int
+	if err := npmBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&nftAfter}, "balanceOf", user); err != nil {
+		t.Fatalf("NPM.balanceOf(user) after: %v", err)
+	}
+	delta := new(big.Int).Sub(nftAfter, nftBefore)
+	t.Logf("user NPM NFTs: %s -> %s (+%s)", nftBefore, nftAfter, delta)
+	if delta.Cmp(big.NewInt(1)) != 0 {
+		t.Errorf("expected user to receive exactly 1 NFT, got delta=%s", delta)
+	}
+}
+

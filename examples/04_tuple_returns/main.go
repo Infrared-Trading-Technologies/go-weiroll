@@ -5,7 +5,7 @@
 //
 // A weiroll *ReturnValue is one slot. Tuples need extraction helpers.
 //
-// The pattern:
+// The pattern, demonstrated end-to-end below:
 //
 //   1. Call the producer with .RawReturn(). The VM stores the entire
 //      returndata as a length-prefixed bytes blob in the slot. The
@@ -16,9 +16,11 @@
 //
 //   3. If the field's real type is uint256/address/bool (anything
 //      32-byte static), use ReturnValue.As to reinterpret the bytes32
-//      as the correct type — off-chain, no extra command. Useful for
-//      static-to-static reinterpretation only; mixing static and
-//      dynamic types is rejected.
+//      as the correct type — off-chain, no extra command.
+//
+//   4. Use the typed *ReturnValue as input to a downstream call.
+//      Below, the extracted tokenId flows directly into
+//      NPM.transferFrom to ship the freshly-minted LP NFT to the user.
 //
 // Pitfalls:
 //
@@ -31,7 +33,8 @@
 //   - Exposing every tuple field by default forces every caller to
 //     pay for extractions they don't use. Two extra commands per
 //     field adds up fast — extract only what downstream actually
-//     consumes.
+//     consumes. Here we only extract slot 0 (tokenId); liquidity,
+//     amount0, and amount1 stay buried in the bytes blob.
 package main
 
 import (
@@ -60,7 +63,9 @@ type MintParams struct {
 	Deadline       *big.Int
 }
 
-// NonfungiblePositionManager.mint - real Uniswap V3 mainnet ABI subset.
+// NPM ABI: mint (tuple-returning) and transferFrom (the downstream
+// consumer of the extracted tokenId). NPM is also an ERC721, so the
+// LP-position NFT can be transferred with transferFrom.
 const npmABI = `[
 	{
 		"name": "mint",
@@ -91,19 +96,24 @@ const npmABI = `[
 			{"name": "amount0",   "type": "uint256"},
 			{"name": "amount1",   "type": "uint256"}
 		]
+	},
+	{
+		"name": "transferFrom",
+		"type": "function",
+		"stateMutability": "nonpayable",
+		"inputs": [
+			{"name": "from",    "type": "address"},
+			{"name": "to",      "type": "address"},
+			{"name": "tokenId", "type": "uint256"}
+		],
+		"outputs": []
 	}
 ]`
 
-// Hypothetical TupleHelper. Deploy once, reuse for every tuple-returning
-// method in your protocol set. Returns one 32-byte ABI word so callers
-// can re-type it via ReturnValue.As. The on-chain implementation is a
-// few lines of assembly:
-//
-//   function extract(bytes calldata data, uint256 index)
-//       external pure returns (bytes32) {
-//       require(data.length >= 32 * (index + 1), "OOB");
-//       return bytes32(data[32 * index : 32 * (index + 1)]);
-//   }
+// TupleHelper. The on-chain implementation lives at
+// integration/contracts/TupleHelper.sol — deploy once, reuse for every
+// tuple-returning method. Returns one 32-byte ABI word so callers can
+// re-type it via ReturnValue.As.
 const tupleHelperABI = `[
 	{
 		"name": "extract",
@@ -113,114 +123,91 @@ const tupleHelperABI = `[
 			{"name": "data",  "type": "bytes"},
 			{"name": "index", "type": "uint256"}
 		],
-		"outputs": [{"name": "", "type": "bytes32"}]
-	}
-]`
-
-// A consumer that takes a tokenId — used here just to show the cast
-// pipes correctly.
-const npmConsumerABI = `[
-	{
-		"name": "increaseLiquidity",
-		"type": "function",
-		"stateMutability": "payable",
-		"inputs": [
-			{
-				"name": "params",
-				"type": "tuple",
-				"components": [
-					{"name": "tokenId",        "type": "uint256"},
-					{"name": "amount0Desired", "type": "uint256"},
-					{"name": "amount1Desired", "type": "uint256"},
-					{"name": "amount0Min",     "type": "uint256"},
-					{"name": "amount1Min",     "type": "uint256"},
-					{"name": "deadline",       "type": "uint256"}
-				]
-			}
-		],
-		"outputs": [
-			{"name": "liquidity", "type": "uint128"},
-			{"name": "amount0",   "type": "uint256"},
-			{"name": "amount1",   "type": "uint256"}
-		]
+		"outputs": [{"name": "word", "type": "bytes32"}]
 	}
 ]`
 
 func main() {
 	npmAddr := common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88")    // Uniswap V3 NPM
 	helperAddr := common.HexToAddress("0x0000000000000000000000000000000000DEAD01") // your deployment
+	vmAddr := common.HexToAddress("0xEEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0")     // weiroll executor
+	user := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")        // who gets the NFT
 
 	npm := weiroll.NewContract(npmAddr, weiroll.MustParseABI(npmABI))
 	helper := weiroll.NewLibrary(helperAddr, weiroll.MustParseABI(tupleHelperABI))
-	npmConsumer := weiroll.NewContract(npmAddr, weiroll.MustParseABI(npmConsumerABI))
 
 	planner := weiroll.New()
 
-	// Build the mint params tuple. Real values would come from user
-	// input. The Go struct's field order must match the ABI tuple.
-	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	// mint params — token0 < token1 by address (USDC < WETH on mainnet).
+	// Recipient is the executor itself, so the freshly-minted NFT lands
+	// at the VM. We then transfer it to `user` using the extracted
+	// tokenId, all in the same weiroll tx.
 	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	mintParams := MintParams{
-		Token0:         weth,
-		Token1:         usdc,
+		Token0:         usdc,
+		Token1:         weth,
 		Fee:            big.NewInt(500),
-		TickLower:      big.NewInt(-887270),
-		TickUpper:      big.NewInt(887270),
-		Amount0Desired: big.NewInt(1e18),
-		Amount1Desired: big.NewInt(1_000_000_000),
+		TickLower:      big.NewInt(-887220), // tick spacing 10 for fee 500
+		TickUpper:      big.NewInt(887220),
+		Amount0Desired: big.NewInt(1_000_000_000), // 1000 USDC, 6 decimals
+		Amount1Desired: big.NewInt(5e17),          // 0.5 WETH
 		Amount0Min:     big.NewInt(0),
 		Amount1Min:     big.NewInt(0),
-		Recipient:      common.HexToAddress("0xCAFECAFECAFECAFECAFECAFECAFECAFECAFECAFE"),
+		Recipient:      vmAddr,
 		Deadline:       big.NewInt(2_000_000_000),
 	}
 
 	// Step 1: mint with .RawReturn(). The slot now holds the entire
-	// 128-byte returndata as bytes. mintRaw.Type() == "bytes" and
-	// IsDynamic() == true.
+	// 128-byte returndata as bytes. mintRaw.Type() == "bytes".
 	mintRaw := planner.Add(npm.MustInvoke("mint", mintParams).RawReturn())
-	fmt.Printf("mintRaw.Type() = %s (dynamic=%v)\n",
+	fmt.Printf("[1] mintRaw.Type()    = %s (dynamic=%v)\n",
 		mintRaw.Type().String(), mintRaw.IsDynamic())
 
-	// Step 2: extract the first 32-byte word (the tokenId) using the
-	// TupleHelper. The helper returns bytes32.
+	// Step 2: extract the first 32-byte word (tokenId) via TupleHelper.
 	tokenIdB32 := planner.Add(helper.MustInvoke("extract", mintRaw, big.NewInt(0)))
-	fmt.Printf("tokenIdB32.Type() = %s\n", tokenIdB32.Type().String())
+	fmt.Printf("[2] tokenIdB32.Type() = %s\n", tokenIdB32.Type().String())
 
-	// Step 3: re-type bytes32 -> uint256 OFF-CHAIN.
-	// Both are static 32-byte slots; the on-chain bytes are identical.
-	// .As avoids a second on-chain command.
+	// Step 3: re-type bytes32 -> uint256 OFF-CHAIN. Both are static
+	// 32-byte slots; the on-chain bytes are identical.
 	tokenId := tokenIdB32.MustAsType("uint256")
-	fmt.Printf("tokenId.Type()    = %s (same slot, retyped off-chain)\n",
+	fmt.Printf("[3] tokenId.Type()    = %s (same slot, retyped via .As)\n",
 		tokenId.Type().String())
 
-	// At this point, `tokenId` is a *ReturnValue typed as uint256
-	// pointing at the same slot as `tokenIdB32`. You can pass it to
-	// any function expecting uint256 — e.g., NPM.positions(tokenId)
-	// or NPM.increaseLiquidity(struct{tokenId, ...}). Building the
-	// consumer struct requires referencing tokenId through the slot
-	// system; that's a separate concern from the cast itself.
-	_ = npmConsumer
+	// Step 4: USE the extracted tokenId. Transfer the LP NFT from the
+	// VM to the user. This is what closes the Case 4 loop — the value
+	// you went through RawReturn -> extract -> .As to get is now an
+	// argument to a real downstream call.
+	planner.Add(npm.MustInvoke("transferFrom", vmAddr, user, tokenId))
+	fmt.Printf("[4] transferFrom queued: VM -> user, tokenId from slot\n")
 
 	plan, err := planner.Plan()
 	if err != nil {
 		log.Fatalf("Plan failed: %v", err)
 	}
 
-	fmt.Printf("\nCommands: %d (mint + extract; the .As cast is free)\n", len(plan.Commands))
+	fmt.Printf("\nCommands: %d  (mint + extract + transferFrom; .As is free)\n", len(plan.Commands))
 	for i, cmd := range plan.Commands {
 		fmt.Printf("  [%d] 0x%s\n", i, hex.EncodeToString(cmd))
 	}
 
 	// Slot-encoding sanity:
-	//   - Producer return slot byte is CLEAN (no 0x80). The VM's
-	//     writeTuple uses this byte unmasked, so any flag bit would
-	//     index out of bounds.
-	//   - Consumer arg byte HAS 0x80, because the slot holds dynamic
-	//     length-prefixed bytes and buildInputs masks the index.
-	_, _, _, prodReturnSlot, _, _ := weiroll.DecodeCommand(plan.Commands[0])
-	_, _, consArgs, _, _, _ := weiroll.DecodeCommand(plan.Commands[1])
-	fmt.Printf("\nmint return slot byte:    0x%02x (dynamic=%v) -- writeTuple uses unmasked\n",
-		prodReturnSlot, prodReturnSlot&weiroll.DynamicSlotFlag != 0)
-	fmt.Printf("extract first arg byte:   0x%02x (dynamic=%v) -- buildInputs masks the flag\n",
-		consArgs[0], consArgs[0]&weiroll.DynamicSlotFlag != 0)
+	//   - mint's return slot byte is CLEAN (no 0x80). writeTuple uses
+	//     it unmasked, so any flag bit would put the slot index out of
+	//     bounds and revert on chain.
+	//   - extract's first arg byte HAS 0x80, because it's reading the
+	//     dynamic bytes the producer wrote. buildInputs masks correctly.
+	//   - transferFrom's tokenId arg slot is the SAME slot as
+	//     tokenIdB32, since .As only changed the off-chain type.
+	_, _, _, mintReturnSlot, _, _ := weiroll.DecodeCommand(plan.Commands[0])
+	_, _, extractArgs, extractReturnSlot, _, _ := weiroll.DecodeCommand(plan.Commands[1])
+	_, _, transferArgs, _, _, _ := weiroll.DecodeCommand(plan.Commands[2])
+	fmt.Println()
+	fmt.Printf("  mint return slot byte:        0x%02x (dynamic=%v)\n",
+		mintReturnSlot, mintReturnSlot&weiroll.DynamicSlotFlag != 0)
+	fmt.Printf("  extract first arg byte:       0x%02x (dynamic=%v)\n",
+		extractArgs[0], extractArgs[0]&weiroll.DynamicSlotFlag != 0)
+	fmt.Printf("  extract return slot byte:     0x%02x\n", extractReturnSlot)
+	fmt.Printf("  transferFrom tokenId arg:     0x%02x  <- same slot as extract's return\n",
+		transferArgs[2])
 }
