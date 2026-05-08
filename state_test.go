@@ -850,6 +850,41 @@ func TestGetSlotsForValueTuple(t *testing.T) {
 		}
 	})
 
+	t.Run("*ReturnValue leaf resolves to producer slot", func(t *testing.T) {
+		// Pre-populate the producer's return slot, then verify a
+		// *ReturnValue inside Tuple lands at exactly that slot index
+		// in the flattened slot list, with no DynamicSlotFlag.
+		sm := newStateManager(defaultPlanConfig())
+		producerCmd := &Command{}
+		sm.returnSlotMap[producerCmd] = 5
+
+		rvType, _ := abi.NewType("uint256", "", nil)
+		rv := &ReturnValue{command: producerCmd, abiType: rvType}
+
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "uint256"},
+		})
+		tv := Tuple(Uint256(big.NewInt(7)), rv)
+		if err := tv.bind(tt); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+
+		slots, err := sm.getSlotsForValue(tv)
+		if err != nil {
+			t.Fatalf("getSlotsForValue: %v", err)
+		}
+		if len(slots) != 2 {
+			t.Fatalf("slot count = %d, want 2", len(slots))
+		}
+		if slots[1] != 5 {
+			t.Errorf("ReturnValue slot = 0x%02x, want 5 (producer's slot)", slots[1])
+		}
+		if slots[1]&DynamicSlotFlag != 0 {
+			t.Errorf("static *ReturnValue leaf must not have DynamicSlotFlag (got 0x%02x)", slots[1])
+		}
+	})
+
 	t.Run("nested static tuple flattens to leaf count", func(t *testing.T) {
 		sm := newStateManager(defaultPlanConfig())
 		// outer: (uint256, (address, uint24)) → 3 leaves

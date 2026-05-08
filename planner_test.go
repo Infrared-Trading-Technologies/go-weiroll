@@ -902,6 +902,53 @@ func TestPlannerClone(t *testing.T) {
 		}
 	})
 
+	t.Run("ReturnValue inside Tuple is rewired on clone", func(t *testing.T) {
+		// Mirrors TestPlanWithChainedReturnValueInTuple's shape so the
+		// clone path's TupleValue child-rewrite is exercised end-to-end.
+		chained := MustParseABI(chainedTupleABI)
+		c2 := NewContract(addr, chained)
+		l2 := NewLibrary(addr, chained)
+
+		p := New()
+		sum := p.Add(l2.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+		p.Add(c2.MustInvoke("consume", Tuple(sum, Address(addr))))
+
+		clone := p.Clone()
+
+		consumeArgs := clone.CommandAt(1).Call().Args()
+		tv, ok := consumeArgs[0].(*TupleValue)
+		if !ok {
+			t.Fatalf("Cloned consume's first arg should be *TupleValue, got %T", consumeArgs[0])
+		}
+		if len(tv.Children()) != 2 {
+			t.Fatalf("Cloned Tuple Children len = %d, want 2", len(tv.Children()))
+		}
+		gotRV, ok := tv.Children()[0].(*ReturnValue)
+		if !ok {
+			t.Fatalf("Cloned Tuple Children[0] should be *ReturnValue, got %T", tv.Children()[0])
+		}
+		if gotRV.command != clone.CommandAt(0) {
+			t.Error("Cloned Tuple's ReturnValue should point at the clone's cmd0")
+		}
+		if gotRV.command == p.CommandAt(0) {
+			t.Error("Cloned Tuple's ReturnValue must not still point at the original cmd0")
+		}
+
+		// Plans should be byte-identical: visibility + slot allocation
+		// must reach the same state regardless of which copy we plan.
+		origPlan, err := p.Plan()
+		if err != nil {
+			t.Fatalf("orig.Plan: %v", err)
+		}
+		clonePlan, err := clone.Plan()
+		if err != nil {
+			t.Fatalf("clone.Plan: %v", err)
+		}
+		if !equalCompiledPlans(origPlan, clonePlan) {
+			t.Error("Original and cloned plans diverged after Tuple-ReturnValue rewrite")
+		}
+	})
+
 	t.Run("ReturnValue outside cloned subtree is preserved", func(t *testing.T) {
 		// Hand-craft a Call whose ReturnValue points at a command in a
 		// different planner that is NOT reachable from the one being cloned.
@@ -1144,6 +1191,85 @@ func TestPlanWithStaticTupleArg(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("reassembled calldata mismatch\n got: %x\nwant: %x", got, want)
+	}
+}
+
+// chainedTupleABI declares a producer (add) and a consumer
+// (consume) that takes a static tuple whose first field is a
+// *ReturnValue from the producer. Mirrors the multi-hop V3 swap
+// shape — the canonical chained-amount pattern v0.2.0 unblocks.
+const chainedTupleABI = `[
+	{
+		"name": "add",
+		"type": "function",
+		"stateMutability": "pure",
+		"inputs": [
+			{"name": "a", "type": "uint256"},
+			{"name": "b", "type": "uint256"}
+		],
+		"outputs": [{"name": "", "type": "uint256"}]
+	},
+	{
+		"name": "consume",
+		"type": "function",
+		"stateMutability": "nonpayable",
+		"inputs": [{
+			"name": "params",
+			"type": "tuple",
+			"components": [
+				{"name": "amount",    "type": "uint256"},
+				{"name": "recipient", "type": "address"}
+			]
+		}],
+		"outputs": []
+	}
+]`
+
+func TestPlanWithChainedReturnValueInTuple(t *testing.T) {
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	contract := NewContract(addr, MustParseABI(chainedTupleABI))
+	lib := NewLibrary(addr, MustParseABI(chainedTupleABI))
+
+	p := New()
+	sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+	p.Add(contract.MustInvoke("consume", Tuple(sum, Address(addr))))
+
+	// Visibility must register cmd0 (the producer) as last-used at
+	// cmd1, otherwise its return slot would never be allocated.
+	vis := p.analyzeVisibility()
+	cmd0 := p.CommandAt(0)
+	lastUsage, found := vis[cmd0]
+	if !found {
+		t.Fatal("producer command missing from visibility map (Tuple recursion not wired?)")
+	}
+	if lastUsage != 1 {
+		t.Errorf("expected producer last usage = 1, got %d", lastUsage)
+	}
+
+	plan, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(plan.Commands))
+	}
+
+	// Decode cmd1; the first argSlot (amount field) must be the
+	// producer's return slot, no DynamicSlotFlag.
+	_, _, argSlots, _, _, err := DecodeCommand(plan.Commands[1])
+	if err != nil {
+		t.Fatalf("DecodeCommand: %v", err)
+	}
+	if len(argSlots) != 2 {
+		t.Fatalf("argSlots count = %d, want 2 (Tuple expanded to 2 slots)", len(argSlots))
+	}
+	prodSlot := uint8(cmd0.returnSlot)
+	if argSlots[0] != prodSlot {
+		t.Errorf("argSlots[0] (amount field) = 0x%02x, want producer slot 0x%02x",
+			argSlots[0], prodSlot)
+	}
+	if argSlots[0]&DynamicSlotFlag != 0 {
+		t.Errorf("static *ReturnValue leaf must not have DynamicSlotFlag (got 0x%02x)", argSlots[0])
 	}
 }
 

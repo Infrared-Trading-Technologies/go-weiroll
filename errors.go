@@ -40,10 +40,11 @@ var (
 		"weiroll: static tuple exceeds 32-byte slot — use weiroll.Tuple(field1, field2, ...) to expand into per-field state slots")
 
 	// ErrInvalidTupleField indicates a leaf inside weiroll.Tuple has an
-	// unsupported type. v1 supports only static literal fields; dynamic
-	// types and *ReturnValue/*StateValue/*SubplanValue are rejected.
+	// unsupported type. Static literals and static-typed *ReturnValue
+	// are supported; dynamic-typed values, *StateValue, and
+	// *SubplanValue are rejected.
 	ErrInvalidTupleField = errors.New(
-		"weiroll: invalid leaf type inside weiroll.Tuple (v1 supports only static literal fields)")
+		"weiroll: invalid leaf type inside weiroll.Tuple (supports static literals and static-typed *ReturnValue)")
 )
 
 // MethodNotFoundError indicates the contract doesn't have the requested method.

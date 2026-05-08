@@ -1078,3 +1078,212 @@ func TestForkUniV3SwapStaticTupleInput(t *testing.T) {
 	_ = time.Second
 }
 
+// TestForkUniV3MultiHopWithChainedAmount is the on-chain regression
+// for the v0.2.0 lift: a *ReturnValue from one command can occupy a
+// static field inside a weiroll.Tuple bound to the next command.
+//
+// Pattern: WETH -> USDC -> WETH using two SwapRouter02.exactInputSingle
+// hops, where hop 2's amountIn is hop 1's *ReturnValue (the swap's
+// uint256 amountOut). Hop 1 sends USDC to the VM; hop 2 spends that
+// USDC and ships WETH back to the user.
+//
+// Why a round trip: it lets us assert that hop 2 consumed *exactly*
+// what hop 1 produced — a chain regression would either leave a USDC
+// remainder at the VM (chained slot read 0 or the wrong value) or
+// revert outright (insufficient balance).
+func TestForkUniV3MultiHopWithChainedAmount(t *testing.T) {
+	pk, err := crypto.HexToECDSA(testPrivateKey)
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	client, auth, from := skipUnlessFork(t)
+	ctx := context.Background()
+
+	setNonceAndGas(t, ctx, client, auth, from, 3_000_000)
+	vmAddr, err := deployContract(ctx, client, auth, pk, "WeirollVM")
+	if err != nil {
+		t.Fatalf("deploy WeirollVM: %v", err)
+	}
+	t.Logf("WeirollVM:        %s", vmAddr.Hex())
+	t.Logf("V3 SwapRouter02:  %s", mainnetUniV3Router02.Hex())
+
+	wethABIParsed := weiroll.MustParseABI(wethABI)
+	weth := weiroll.NewContract(mainnetWETH, wethABIParsed)
+	usdc := weiroll.NewContract(mainnetUSDC, weiroll.MustParseABI(erc20StdABI))
+	router := weiroll.NewContract(mainnetUniV3Router02, weiroll.MustParseABI(uniV3Router02ABI))
+
+	swapAmount := big.NewInt(5e17) // 0.5 ETH worth
+	maxUint := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	planner := weiroll.New()
+
+	// cmd 0: wrap ETH at the VM (CALL frame; CALLVALUE preserved through
+	// the payable WETH.deposit dispatcher).
+	planner.Add(weth.MustInvoke("deposit").WithValue(swapAmount))
+	// cmd 1: approve router to pull WETH from VM.
+	planner.Add(weth.MustInvoke("approve", mainnetUniV3Router02, maxUint))
+
+	// cmd 2: hop 1 — WETH -> USDC, recipient = VM (so USDC lands at VM).
+	hop1Params := weiroll.Tuple(
+		weiroll.Address(mainnetWETH),
+		weiroll.Address(mainnetUSDC),
+		weiroll.MustLiteralFromType("uint24", big.NewInt(500)),
+		weiroll.Address(vmAddr),
+		weiroll.Uint256(swapAmount),
+		weiroll.Uint256(big.NewInt(0)),
+		weiroll.MustLiteralFromType("uint160", big.NewInt(0)),
+	)
+	hop1Out := planner.Add(router.MustInvoke("exactInputSingle", hop1Params))
+
+	// cmd 3: approve router to pull USDC from VM for hop 2.
+	planner.Add(usdc.MustInvoke("approve", mainnetUniV3Router02, maxUint))
+
+	// cmd 4: hop 2 — USDC -> WETH, amountIn = hop1Out (chained
+	// *ReturnValue inside Tuple). Recipient = user EOA.
+	hop2Params := weiroll.Tuple(
+		weiroll.Address(mainnetUSDC),
+		weiroll.Address(mainnetWETH),
+		weiroll.MustLiteralFromType("uint24", big.NewInt(500)),
+		weiroll.Address(from),
+		hop1Out, // <-- the entire point of v0.2.0
+		weiroll.Uint256(big.NewInt(0)),
+		weiroll.MustLiteralFromType("uint160", big.NewInt(0)),
+	)
+	planner.Add(router.MustInvoke("exactInputSingle", hop2Params))
+
+	plan, err := planner.Plan()
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	t.Logf("plan: %d commands, %d state slots", len(plan.Commands), len(plan.State))
+
+	// Static shape assertions. Both hops must be extended commands with
+	// 7 all-static argSlots.
+	_, hop1Flags, hop1ArgSlots, hop1ReturnSlot, _, err := weiroll.DecodeCommand(plan.Commands[2])
+	if err != nil {
+		t.Fatalf("DecodeCommand hop1: %v", err)
+	}
+	if !hop1Flags.IsExtended() {
+		t.Errorf("hop1 should be extended (>6 args); flags=0x%02x", hop1Flags)
+	}
+	if len(hop1ArgSlots) != 7 {
+		t.Fatalf("hop1 argSlots = %d, want 7", len(hop1ArgSlots))
+	}
+	for i, s := range hop1ArgSlots {
+		if s&weiroll.DynamicSlotFlag != 0 {
+			t.Errorf("hop1 argSlot[%d]=0x%02x has DynamicSlotFlag (must be static)", i, s)
+		}
+	}
+	if hop1ReturnSlot == weiroll.NoReturnSlot {
+		t.Fatal("hop1 should have a return slot (consumed by hop 2)")
+	}
+	hop1ProdSlot := hop1ReturnSlot &^ weiroll.DynamicSlotFlag
+
+	_, hop2Flags, hop2ArgSlots, _, _, err := weiroll.DecodeCommand(plan.Commands[4])
+	if err != nil {
+		t.Fatalf("DecodeCommand hop2: %v", err)
+	}
+	if !hop2Flags.IsExtended() {
+		t.Errorf("hop2 should be extended (>6 args); flags=0x%02x", hop2Flags)
+	}
+	if len(hop2ArgSlots) != 7 {
+		t.Fatalf("hop2 argSlots = %d, want 7", len(hop2ArgSlots))
+	}
+	for i, s := range hop2ArgSlots {
+		if s&weiroll.DynamicSlotFlag != 0 {
+			t.Errorf("hop2 argSlot[%d]=0x%02x has DynamicSlotFlag (must be static)", i, s)
+		}
+	}
+
+	// Wire-level proof: hop2's amountIn position (Tuple field index 4)
+	// must reference hop1's return slot. If the chain regressed, this
+	// argSlot would point at some unrelated slot and the on-chain
+	// behavior below would diverge.
+	if hop2ArgSlots[4] != hop1ProdSlot {
+		t.Errorf("hop2 amountIn slot = 0x%02x, want hop1 producer slot 0x%02x",
+			hop2ArgSlots[4], hop1ProdSlot)
+	}
+	t.Logf("chained slot: hop1 returns to slot %d, hop2 amountIn reads slot %d",
+		hop1ProdSlot, hop2ArgSlots[4])
+
+	// Pre-simulate to surface revert reasons (would fire if visibility
+	// recursion regressed and the producer slot stayed unallocated).
+	if err := simulateExecute(ctx, client, from, vmAddr, plan, swapAmount); err != nil {
+		t.Fatalf("simulateExecute reverted: %v", err)
+	}
+
+	// Capture user/VM token balances pre-execution.
+	erc20 := weiroll.MustParseABI(erc20StdABI)
+	usdcBound := bind.NewBoundContract(mainnetUSDC, erc20, client, client, client)
+	wethBound := bind.NewBoundContract(mainnetWETH, wethABIParsed, client, client, client)
+
+	var userWETHBefore *big.Int
+	if err := wethBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&userWETHBefore}, "balanceOf", from); err != nil {
+		t.Fatalf("WETH.balanceOf(user) before: %v", err)
+	}
+	var vmUSDCBefore *big.Int
+	if err := usdcBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&vmUSDCBefore}, "balanceOf", vmAddr); err != nil {
+		t.Fatalf("USDC.balanceOf(vm) before: %v", err)
+	}
+	if vmUSDCBefore.Sign() != 0 {
+		t.Fatalf("VM expected to start with zero USDC; got %s", vmUSDCBefore)
+	}
+
+	// Execute the plan. auth.Value funds the WETH.deposit at cmd 0.
+	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
+	vmBound := bind.NewBoundContract(vmAddr, vmABIParsed, client, client, client)
+
+	setNonceAndGas(t, ctx, client, auth, from, 1_500_000)
+	auth.Value = swapAmount
+	tx, err := vmBound.Transact(auth, "execute", plan.CommandsAsBytes32(), plan.StateAsBytes())
+	if err != nil {
+		t.Fatalf("VM.execute send: %v", err)
+	}
+	receipt, err := bind.WaitMined(ctx, client, tx)
+	if err != nil {
+		t.Fatalf("VM.execute mined: %v", err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		t.Fatalf("VM.execute reverted: status=%d gas=%d txhash=%s",
+			receipt.Status, receipt.GasUsed, receipt.TxHash.Hex())
+	}
+	t.Logf("VM.execute gas used: %d", receipt.GasUsed)
+
+	// Behavioral assertions. The decisive one is vmUSDCAfter == 0:
+	// only a correctly-chained amountIn = hop1Out can drain the VM
+	// exactly. A broken chain would leave a USDC remainder (or revert).
+	var userWETHAfter *big.Int
+	if err := wethBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&userWETHAfter}, "balanceOf", from); err != nil {
+		t.Fatalf("WETH.balanceOf(user) after: %v", err)
+	}
+	userWETHDelta := new(big.Int).Sub(userWETHAfter, userWETHBefore)
+	t.Logf("user WETH delta: %s wei (%.6f WETH)",
+		userWETHDelta, float64(userWETHDelta.Int64())/1e18)
+	if userWETHDelta.Sign() <= 0 {
+		t.Errorf("expected user WETH delta > 0 (round trip should deliver WETH back), got %s",
+			userWETHDelta)
+	}
+
+	var vmUSDCAfter *big.Int
+	if err := usdcBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&vmUSDCAfter}, "balanceOf", vmAddr); err != nil {
+		t.Fatalf("USDC.balanceOf(vm) after: %v", err)
+	}
+	if vmUSDCAfter.Sign() != 0 {
+		t.Errorf("VM should have 0 USDC after hop 2 (chained amountIn must drain hop 1's output); got %s",
+			vmUSDCAfter)
+	}
+
+	var vmWETHAfter *big.Int
+	if err := wethBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&vmWETHAfter}, "balanceOf", vmAddr); err != nil {
+		t.Fatalf("WETH.balanceOf(vm) after: %v", err)
+	}
+	if vmWETHAfter.Sign() != 0 {
+		t.Errorf("VM should have 0 WETH after hop 1 (sent to router); got %s", vmWETHAfter)
+	}
+}
+

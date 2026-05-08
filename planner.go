@@ -256,10 +256,29 @@ func (ctx *cloneContext) rewireValue(v Value) Value {
 	case *SubplanValue:
 		return &SubplanValue{subplanner: ctx.clonePlanner(val.subplanner)}
 	case *TupleValue:
-		// Immutable post-bind: children are *LiteralValue (also
-		// immutable) or nested *TupleValue. Safe to share. (When v2
-		// allows *ReturnValue leaves, this case must rewrite children.)
-		return val
+		// Children may include *ReturnValue leaves whose underlying
+		// *Command was cloned; those need rewriting. Literals and
+		// nested tuples whose own children don't rewire end up
+		// returning themselves, so we share them. Allocate a new
+		// children slice only when at least one child changed pointer.
+		var newChildren []Value
+		for i, child := range val.children {
+			rewired := ctx.rewireValue(child)
+			if rewired != child && newChildren == nil {
+				newChildren = make([]Value, len(val.children))
+				copy(newChildren, val.children)
+			}
+			if newChildren != nil {
+				newChildren[i] = rewired
+			}
+		}
+		if newChildren == nil {
+			return val
+		}
+		return &TupleValue{
+			abiType:  val.abiType,
+			children: newChildren,
+		}
 	default:
 		return val
 	}
@@ -392,25 +411,39 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 	return slots, nil
 }
 
-// analyzeVisibility determines the last command index that uses each command's return value.
-// Returns a map from command to its last usage index.
+// analyzeVisibility determines the last command index that uses each
+// command's return value. Returns a map from command to its last
+// usage index.
 //
-// Note: this loop walks Args() at the public-arity level. v1's
-// *TupleValue forbids *ReturnValue leaves, so visibility is correct.
-// TODO: when *ReturnValue leaves are allowed inside *TupleValue
-// (deferred to v2), this loop must recurse into TupleValue children.
+// Walks args at the public-arity level and recurses into *TupleValue
+// children so that a *ReturnValue nested inside a Tuple registers
+// its consumer at the right command index — without this, the
+// producer's return slot would never be allocated and getSlotsForValue
+// would later fail with ErrReturnValueNotVisible.
 func (p *Planner) analyzeVisibility() map[*Command]int {
 	visibility := make(map[*Command]int)
 
 	for i, cmd := range p.commands {
 		for _, arg := range cmd.call.Args() {
-			if rv, ok := arg.(*ReturnValue); ok {
-				visibility[rv.command] = i
-			}
+			recordVisibility(visibility, arg, i)
 		}
 	}
 
 	return visibility
+}
+
+// recordVisibility marks v's contribution to the visibility map.
+// *ReturnValue records its producer at cmdIndex; *TupleValue recurses.
+// Other Value kinds contribute no visibility.
+func recordVisibility(vis map[*Command]int, v Value, cmdIndex int) {
+	switch val := v.(type) {
+	case *ReturnValue:
+		vis[val.command] = cmdIndex
+	case *TupleValue:
+		for _, child := range val.children {
+			recordVisibility(vis, child, cmdIndex)
+		}
+	}
 }
 
 // checkCycle checks for cyclic planner references.

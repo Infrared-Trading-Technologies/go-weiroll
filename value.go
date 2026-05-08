@@ -178,9 +178,10 @@ func (v *StateValue) Data() []byte {
 // split into N slots.
 //
 // TupleValue is created via Tuple(...) and bound to the expected ABI
-// type when used as a function argument. v1 supports only fully-static
-// tuples; dynamic leaves and *ReturnValue / *StateValue / *SubplanValue
-// inside a tuple are rejected at bind time.
+// type when used as a function argument. Leaves must be static
+// literals or static-typed *ReturnValue (chained from a prior
+// command). Dynamic-typed leaves, *StateValue, and *SubplanValue are
+// rejected at bind time.
 type TupleValue struct {
 	abiType  abi.Type
 	children []Value // populated by bind; nil before bind
@@ -212,7 +213,7 @@ func (v *TupleValue) Data() []byte {
 
 // Children returns the bound child values (one per tuple field). Nil
 // before bind. Children of a nested static tuple are themselves
-// *TupleValue; leaf fields are *LiteralValue.
+// *TupleValue; leaf fields are *LiteralValue or *ReturnValue.
 func (v *TupleValue) Children() []Value {
 	return v.children
 }
@@ -228,10 +229,12 @@ func (v *TupleValue) Children() []Value {
 // expands into one state slot per leaf field, satisfying the VM's
 // 32-byte static-slot invariant.
 //
-// v1 limitations: leaves must be static literal types. *ReturnValue,
-// *StateValue, *SubplanValue, and dynamic ABI types are rejected at
-// bind time. Dynamic tuples (containing any dynamic field) should be
-// passed as a single literal via the existing path.
+// Leaves must be static literals or static-typed *ReturnValue
+// (chained from a prior command, e.g. multi-hop V3 swaps where one
+// hop's amountOut feeds the next hop's amountIn). Dynamic-typed
+// values, *StateValue, and *SubplanValue are rejected at bind time.
+// Dynamic tuples (containing any dynamic field) should be passed as
+// a single literal via the existing path.
 func Tuple(fields ...any) *TupleValue {
 	raw := make([]any, len(fields))
 	copy(raw, fields)
@@ -285,7 +288,17 @@ func (v *TupleValue) bind(expectedType abi.Type) error {
 
 		switch f := rawField.(type) {
 		case *ReturnValue:
-			return &EncodingError{Value: f, Err: ErrInvalidTupleField}
+			// elemType is static (passed isDynamicType guard above).
+			// Accept iff the ReturnValue's recorded type matches.
+			// Mismatches surface as *TypeMismatchError, mirroring
+			// toValue's behavior for arbitrary Value args.
+			if f.Type().String() != elemType.String() {
+				return &TypeMismatchError{
+					Expected: elemType.String(),
+					Got:      f.Type().String(),
+				}
+			}
+			children[i] = f
 		case *StateValue:
 			return &EncodingError{Value: f, Err: ErrInvalidTupleField}
 		case *SubplanValue:

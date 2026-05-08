@@ -778,12 +778,58 @@ func TestTupleValue(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects ReturnValue leaf", func(t *testing.T) {
-		// Construct a *ReturnValue manually (in-package).
+	t.Run("accepts *ReturnValue static leaf", func(t *testing.T) {
+		// Construct a *ReturnValue typed as uint256 manually.
 		rvType, _ := abi.NewType("uint256", "", nil)
 		rv := &ReturnValue{command: &Command{}, abiType: rvType}
 
-		// Two-field static tuple of (uint256, uint256).
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "uint256"},
+		})
+		tv := Tuple(big.NewInt(1), rv)
+		if err := tv.bind(tt); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+		if got := len(tv.Children()); got != 2 {
+			t.Fatalf("Children() len = %d, want 2", got)
+		}
+		gotRV, ok := tv.Children()[1].(*ReturnValue)
+		if !ok {
+			t.Fatalf("Children()[1] should be *ReturnValue, got %T", tv.Children()[1])
+		}
+		if gotRV != rv {
+			t.Error("Children()[1] should be the exact *ReturnValue passed in")
+		}
+	})
+
+	t.Run("rejects *ReturnValue dynamic leaf", func(t *testing.T) {
+		// elemType bytes is dynamic, so the outer dynamic-elem guard
+		// fires regardless of the rawField type — the *ReturnValue
+		// case is unreachable for dynamic positions, which is the
+		// invariant we want to lock in.
+		bytesType, _ := abi.NewType("bytes", "", nil)
+		rv := &ReturnValue{command: &Command{}, abiType: bytesType}
+
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "bytes"},
+		})
+		tv := Tuple(big.NewInt(1), rv)
+		err := tv.bind(tt)
+		if err == nil {
+			t.Fatal("expected error for dynamic-typed leaf position")
+		}
+		if !errorIs(err, ErrInvalidTupleField) {
+			t.Errorf("expected ErrInvalidTupleField, got: %v", err)
+		}
+	})
+
+	t.Run("rejects type-mismatched *ReturnValue", func(t *testing.T) {
+		// *ReturnValue typed as address, but the field expects uint256.
+		addrType, _ := abi.NewType("address", "", nil)
+		rv := &ReturnValue{command: &Command{}, abiType: addrType}
+
 		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
 			{Name: "a", Type: "uint256"},
 			{Name: "b", Type: "uint256"},
@@ -791,7 +837,30 @@ func TestTupleValue(t *testing.T) {
 		tv := Tuple(big.NewInt(1), rv)
 		err := tv.bind(tt)
 		if err == nil {
-			t.Fatal("expected error for ReturnValue leaf")
+			t.Fatal("expected type-mismatch error")
+		}
+		mm, ok := err.(*TypeMismatchError)
+		if !ok {
+			t.Fatalf("expected *TypeMismatchError, got %T: %v", err, err)
+		}
+		if mm.Expected != "uint256" || mm.Got != "address" {
+			t.Errorf("got TypeMismatchError{Expected:%q, Got:%q}, want {uint256, address}",
+				mm.Expected, mm.Got)
+		}
+	})
+
+	t.Run("rejects *StateValue leaf", func(t *testing.T) {
+		// *StateValue stays rejected — its semantics don't fit a
+		// flattened static-tuple field.
+		sv := &StateValue{}
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "uint256"},
+		})
+		tv := Tuple(big.NewInt(1), sv)
+		err := tv.bind(tt)
+		if err == nil {
+			t.Fatal("expected error for *StateValue leaf")
 		}
 		if !errorIs(err, ErrInvalidTupleField) {
 			t.Errorf("expected ErrInvalidTupleField, got: %v", err)
