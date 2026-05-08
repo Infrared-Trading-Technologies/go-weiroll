@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -384,6 +385,17 @@ func TestGetReturnSlot(t *testing.T) {
 	})
 }
 
+// singleSlot is a test helper that wraps getSlotsForValue for the
+// single-slot Value types covered in this file. Production callers
+// use the plural form directly to support *TupleValue expansion.
+func singleSlot(sm *stateManager, v Value) (uint8, error) {
+	slots, err := sm.getSlotsForValue(v)
+	if err != nil {
+		return 0, err
+	}
+	return slots[0], nil
+}
+
 func TestGetSlotForValue(t *testing.T) {
 	config := defaultPlanConfig()
 
@@ -391,7 +403,7 @@ func TestGetSlotForValue(t *testing.T) {
 		sm := newStateManager(config)
 		lit := Uint256(big.NewInt(42))
 
-		slot, err := sm.getSlotForValue(lit)
+		slot, err := singleSlot(sm,lit)
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
 		}
@@ -407,7 +419,7 @@ func TestGetSlotForValue(t *testing.T) {
 		sm.returnSlotMap[cmd] = 3
 
 		rv := &ReturnValue{command: cmd}
-		slot, err := sm.getSlotForValue(rv)
+		slot, err := singleSlot(sm,rv)
 
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
@@ -421,7 +433,7 @@ func TestGetSlotForValue(t *testing.T) {
 		sm := newStateManager(config)
 
 		rv := &ReturnValue{command: &Command{}}
-		_, err := sm.getSlotForValue(rv)
+		_, err := singleSlot(sm,rv)
 
 		if err != ErrReturnValueNotVisible {
 			t.Errorf("Expected ErrReturnValueNotVisible, got %v", err)
@@ -432,7 +444,7 @@ func TestGetSlotForValue(t *testing.T) {
 		sm := newStateManager(config)
 
 		sv := &StateValue{}
-		slot, err := sm.getSlotForValue(sv)
+		slot, err := singleSlot(sm,sv)
 
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
@@ -446,7 +458,7 @@ func TestGetSlotForValue(t *testing.T) {
 		sm := newStateManager(config)
 
 		spv := &SubplanValue{}
-		slot, err := sm.getSlotForValue(spv)
+		slot, err := singleSlot(sm,spv)
 
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
@@ -584,7 +596,7 @@ func TestDynamicValueSlots(t *testing.T) {
 		sm := newStateManager(config)
 		lit := Bytes([]byte{1, 2, 3})
 
-		slot, err := sm.getSlotForValue(lit)
+		slot, err := singleSlot(sm,lit)
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
 		}
@@ -598,7 +610,7 @@ func TestDynamicValueSlots(t *testing.T) {
 		sm := newStateManager(config)
 		lit := Address(common.HexToAddress("0x1234567890123456789012345678901234567890"))
 
-		slot, err := sm.getSlotForValue(lit)
+		slot, err := singleSlot(sm,lit)
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
 		}
@@ -612,7 +624,7 @@ func TestDynamicValueSlots(t *testing.T) {
 		sm := newStateManager(config)
 		lit := Bool(true)
 
-		slot, err := sm.getSlotForValue(lit)
+		slot, err := singleSlot(sm,lit)
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
 		}
@@ -748,6 +760,120 @@ func TestLiteralsNeverReuseFreedReturnSlots(t *testing.T) {
 		// Dynamic literal should also not reuse the freed slot
 		if litSlotIdx == returnSlotIdx {
 			t.Errorf("BUG: Dynamic literal was allocated to freed return slot %d!", returnSlotIdx)
+		}
+	})
+}
+
+func TestGetSlotsForValueTuple(t *testing.T) {
+	addr := common.HexToAddress("0x000000000000000000000000000000000000000A")
+	staticTupleType := func(t *testing.T) abi.Type {
+		t.Helper()
+		tt, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "tokenIn", Type: "address"},
+			{Name: "tokenOut", Type: "address"},
+			{Name: "fee", Type: "uint24"},
+			{Name: "recipient", Type: "address"},
+			{Name: "amountIn", Type: "uint256"},
+			{Name: "amountOutMinimum", Type: "uint256"},
+			{Name: "sqrtPriceLimitX96", Type: "uint160"},
+		})
+		if err != nil {
+			t.Fatalf("staticTupleType: %v", err)
+		}
+		return tt
+	}
+
+	t.Run("7-field static tuple allocates 7 slots, no dynamic flag", func(t *testing.T) {
+		sm := newStateManager(defaultPlanConfig())
+		tt := staticTupleType(t)
+		tv := Tuple(
+			Address(addr),
+			Address(addr), // intentional duplicate to exercise dedup with field 0
+			MustLiteralFromType("uint24", big.NewInt(500)),
+			Address(addr), // duplicate again
+			Uint256(big.NewInt(1_000_000)),
+			Uint256(big.NewInt(0)),
+			MustLiteralFromType("uint160", big.NewInt(0)),
+		)
+		if err := tv.bind(tt); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+
+		slots, err := sm.getSlotsForValue(tv)
+		if err != nil {
+			t.Fatalf("getSlotsForValue: %v", err)
+		}
+		if len(slots) != 7 {
+			t.Fatalf("slot count = %d, want 7", len(slots))
+		}
+		for i, s := range slots {
+			if s&DynamicSlotFlag != 0 {
+				t.Errorf("slot[%d] = 0x%02x has DynamicSlotFlag (static tuple should be all-static)", i, s)
+			}
+		}
+		// Dedup: addr appears 3 times (slots 0, 1, 3) — they must share.
+		if slots[0] != slots[1] || slots[0] != slots[3] {
+			t.Errorf("expected dedup: slot[0]=0x%02x slot[1]=0x%02x slot[3]=0x%02x", slots[0], slots[1], slots[3])
+		}
+	})
+
+	t.Run("dedup across two TupleValues sharing a leaf", func(t *testing.T) {
+		sm := newStateManager(defaultPlanConfig())
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "x", Type: "uint256"},
+			{Name: "y", Type: "uint256"},
+		})
+
+		tvA := Tuple(Uint256(big.NewInt(7)), Uint256(big.NewInt(8)))
+		tvB := Tuple(Uint256(big.NewInt(7)), Uint256(big.NewInt(9))) // shares x
+		if err := tvA.bind(tt); err != nil {
+			t.Fatal(err)
+		}
+		if err := tvB.bind(tt); err != nil {
+			t.Fatal(err)
+		}
+
+		slotsA, err := sm.getSlotsForValue(tvA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slotsB, err := sm.getSlotsForValue(tvB)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if slotsA[0] != slotsB[0] {
+			t.Errorf("expected shared slot for value 7: A=0x%02x B=0x%02x", slotsA[0], slotsB[0])
+		}
+		if slotsA[1] == slotsB[1] {
+			t.Errorf("distinct values 8 and 9 must not dedup: both = 0x%02x", slotsA[1])
+		}
+	})
+
+	t.Run("nested static tuple flattens to leaf count", func(t *testing.T) {
+		sm := newStateManager(defaultPlanConfig())
+		// outer: (uint256, (address, uint24)) → 3 leaves
+		outer, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "x", Type: "uint256"},
+			{Name: "inner", Type: "tuple", Components: []abi.ArgumentMarshaling{
+				{Name: "a", Type: "address"},
+				{Name: "b", Type: "uint24"},
+			}},
+		})
+		tv := Tuple(
+			Uint256(big.NewInt(1)),
+			Tuple(Address(addr), MustLiteralFromType("uint24", big.NewInt(3000))),
+		)
+		if err := tv.bind(outer); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+
+		slots, err := sm.getSlotsForValue(tv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(slots) != 3 {
+			t.Errorf("nested tuple slots = %d, want 3", len(slots))
 		}
 	})
 }

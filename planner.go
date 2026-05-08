@@ -255,6 +255,11 @@ func (ctx *cloneContext) rewireValue(v Value) Value {
 		return &StateValue{planner: ctx.clonePlanner(val.planner)}
 	case *SubplanValue:
 		return &SubplanValue{subplanner: ctx.clonePlanner(val.subplanner)}
+	case *TupleValue:
+		// Immutable post-bind: children are *LiteralValue (also
+		// immutable) or nested *TupleValue. Safe to share. (When v2
+		// allows *ReturnValue leaves, this case must rewrite children.)
+		return val
 	default:
 		return val
 	}
@@ -358,17 +363,20 @@ func (p *Planner) Plan(opts ...PlanOption) (*CompiledPlan, error) {
 	}, nil
 }
 
-// buildArgSlots builds the argument slot array for a command.
+// buildArgSlots builds the argument slot array for a command. Public
+// arity is preserved (one entry in args == one ABI input parameter),
+// but a single *TupleValue arg expands into multiple state slots, so
+// the returned slot list may be longer than args.
 func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, error) {
 	args := cmd.call.Args()
-	slots := make([]uint8, len(args))
+	slots := make([]uint8, 0, len(args))
 
-	for i, arg := range args {
-		slot, err := state.getSlotForValue(arg)
+	for _, arg := range args {
+		argSlots, err := state.getSlotsForValue(arg)
 		if err != nil {
 			return nil, err
 		}
-		slots[i] = slot
+		slots = append(slots, argSlots...)
 	}
 
 	// If call has value, add it as an extra argument
@@ -386,6 +394,11 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 
 // analyzeVisibility determines the last command index that uses each command's return value.
 // Returns a map from command to its last usage index.
+//
+// Note: this loop walks Args() at the public-arity level. v1's
+// *TupleValue forbids *ReturnValue leaves, so visibility is correct.
+// TODO: when *ReturnValue leaves are allowed inside *TupleValue
+// (deferred to v2), this loop must recurse into TupleValue children.
 func (p *Planner) analyzeVisibility() map[*Command]int {
 	visibility := make(map[*Command]int)
 

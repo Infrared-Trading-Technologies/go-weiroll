@@ -125,33 +125,55 @@ func (sm *stateManager) getReturnSlot(cmd *Command) (uint8, bool) {
 	return slot, exists
 }
 
-// getSlotForValue returns the slot for a Value.
-// For literals, allocates if needed. For return values, looks up existing slot.
-func (sm *stateManager) getSlotForValue(v Value) (uint8, error) {
+// getSlotsForValue returns the state slot(s) for a Value. Most Value
+// types occupy a single slot; *TupleValue expands into one slot per
+// leaf field (recursively for nested static tuples).
+//
+// For literals, allocates if needed. For return values, looks up the
+// existing slot. The returned slot indices already carry
+// DynamicSlotFlag where applicable.
+func (sm *stateManager) getSlotsForValue(v Value) ([]uint8, error) {
 	switch val := v.(type) {
 	case *LiteralValue:
-		return sm.allocateLiteral(val)
+		slot, err := sm.allocateLiteral(val)
+		if err != nil {
+			return nil, err
+		}
+		return []uint8{slot}, nil
 
 	case *ReturnValue:
 		slot, exists := sm.returnSlotMap[val.command]
 		if !exists {
-			return 0, ErrReturnValueNotVisible
+			return nil, ErrReturnValueNotVisible
 		}
 		if val.IsDynamic() {
-			return slot | DynamicSlotFlag, nil
+			return []uint8{slot | DynamicSlotFlag}, nil
 		}
-		return slot, nil
+		return []uint8{slot}, nil
 
 	case *StateValue:
-		return StateSlotMarker, nil
+		return []uint8{StateSlotMarker}, nil
 
 	case *SubplanValue:
 		// Subplan commands are encoded separately
 		// This returns a placeholder that will be replaced
-		return StateSlotMarker, nil
+		return []uint8{StateSlotMarker}, nil
+
+	case *TupleValue:
+		// Expand into per-field slots. Nested static tuples recurse
+		// naturally and are flattened in declaration order.
+		slots := make([]uint8, 0, len(val.children))
+		for _, child := range val.children {
+			childSlots, err := sm.getSlotsForValue(child)
+			if err != nil {
+				return nil, err
+			}
+			slots = append(slots, childSlots...)
+		}
+		return slots, nil
 
 	default:
-		return 0, &EncodingError{Value: v, Err: ErrReturnValueNotVisible}
+		return nil, &EncodingError{Value: v, Err: ErrReturnValueNotVisible}
 	}
 }
 

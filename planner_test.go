@@ -1036,3 +1036,145 @@ func TestVisibilityAnalysis(t *testing.T) {
 		}
 	})
 }
+
+// exactInputSingleABI mirrors the Uniswap V3 SwapRouter02 method that
+// triggered the original revert: a 7-field static tuple parameter that
+// the on-chain VM rejects as a single >32-byte slot.
+const exactInputSingleABI = `[{
+	"name": "exactInputSingle",
+	"type": "function",
+	"stateMutability": "payable",
+	"inputs": [{
+		"name": "params",
+		"type": "tuple",
+		"components": [
+			{"name": "tokenIn",           "type": "address"},
+			{"name": "tokenOut",          "type": "address"},
+			{"name": "fee",               "type": "uint24"},
+			{"name": "recipient",         "type": "address"},
+			{"name": "amountIn",          "type": "uint256"},
+			{"name": "amountOutMinimum",  "type": "uint256"},
+			{"name": "sqrtPriceLimitX96", "type": "uint160"}
+		]
+	}],
+	"outputs": [{"name": "amountOut", "type": "uint256"}]
+}]`
+
+func TestPlanWithStaticTupleArg(t *testing.T) {
+	routerAddr := common.HexToAddress("0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45")
+	tokenIn := common.HexToAddress("0x514910771AF9Ca656af840dff83E8264EcF986CA") // LINK
+	tokenOut := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2") // WETH
+	recipient := common.HexToAddress("0xEEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0")
+
+	router := NewContract(routerAddr, MustParseABI(exactInputSingleABI))
+	planner := New()
+
+	params := Tuple(
+		Address(tokenIn),
+		Address(tokenOut),
+		MustLiteralFromType("uint24", big.NewInt(3000)),
+		Address(recipient),
+		Uint256(big.NewInt(1_000_000_000_000_000_000)), // 1 LINK
+		Uint256(big.NewInt(0)),                         // amountOutMinimum
+		MustLiteralFromType("uint160", big.NewInt(0)),  // sqrtPriceLimitX96
+	)
+
+	planner.Add(router.MustInvoke("exactInputSingle", params))
+
+	plan, err := planner.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if len(plan.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(plan.Commands))
+	}
+
+	// Decode and verify: 7 args, all static slots, extended encoding.
+	_, flags, argSlots, _, _, err := DecodeCommand(plan.Commands[0])
+	if err != nil {
+		t.Fatalf("DecodeCommand: %v", err)
+	}
+	if !flags.IsExtended() {
+		t.Errorf("expected extended-command flag (>6 args), got flags=0x%02x", flags)
+	}
+	if len(argSlots) != 7 {
+		t.Fatalf("argSlots count = %d, want 7", len(argSlots))
+	}
+	for i, s := range argSlots {
+		if s&DynamicSlotFlag != 0 {
+			t.Errorf("argSlot[%d] = 0x%02x has DynamicSlotFlag (must be static)", i, s)
+		}
+	}
+
+	// Reconstruct calldata from state slots and compare with abi.Pack of
+	// the equivalent struct — proves the on-chain VM would assemble the
+	// same calldata it would for an inline struct call.
+	want, err := router.ABI().Methods["exactInputSingle"].Inputs.Pack(struct {
+		TokenIn           common.Address
+		TokenOut          common.Address
+		Fee               *big.Int
+		Recipient         common.Address
+		AmountIn          *big.Int
+		AmountOutMinimum  *big.Int
+		SqrtPriceLimitX96 *big.Int
+	}{
+		TokenIn:           tokenIn,
+		TokenOut:          tokenOut,
+		Fee:               big.NewInt(3000),
+		Recipient:         recipient,
+		AmountIn:          big.NewInt(1_000_000_000_000_000_000),
+		AmountOutMinimum:  big.NewInt(0),
+		SqrtPriceLimitX96: big.NewInt(0),
+	})
+	if err != nil {
+		t.Fatalf("abi.Pack reference: %v", err)
+	}
+
+	got := make([]byte, 0, 7*32)
+	for _, slotIdx := range argSlots {
+		idx := slotIdx & 0x7f
+		if int(idx) >= len(plan.State) {
+			t.Fatalf("slot %d out of range (state len %d)", idx, len(plan.State))
+		}
+		slotData := plan.State[idx]
+		if len(slotData) != 32 {
+			t.Fatalf("slot %d data length = %d, want 32", idx, len(slotData))
+		}
+		got = append(got, slotData...)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("reassembled calldata mismatch\n got: %x\nwant: %x", got, want)
+	}
+}
+
+func TestPlanRejectsStructLiteralForStaticTuple(t *testing.T) {
+	router := NewContract(
+		common.HexToAddress("0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"),
+		MustParseABI(exactInputSingleABI),
+	)
+
+	// Passing a Go struct directly should now fail at toValue/NewLiteral
+	// with ErrStaticTupleTooLarge, pointing the user at weiroll.Tuple.
+	type params struct {
+		TokenIn           common.Address
+		TokenOut          common.Address
+		Fee               *big.Int
+		Recipient         common.Address
+		AmountIn          *big.Int
+		AmountOutMinimum  *big.Int
+		SqrtPriceLimitX96 *big.Int
+	}
+
+	_, err := router.Invoke("exactInputSingle", params{
+		Fee:               big.NewInt(3000),
+		AmountIn:          big.NewInt(1),
+		AmountOutMinimum:  big.NewInt(0),
+		SqrtPriceLimitX96: big.NewInt(0),
+	})
+	if err == nil {
+		t.Fatal("expected error when passing struct literal to static-tuple method")
+	}
+	if !strings.Contains(err.Error(), "weiroll.Tuple") {
+		t.Errorf("error message should reference weiroll.Tuple; got: %v", err)
+	}
+}

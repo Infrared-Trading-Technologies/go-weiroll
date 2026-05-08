@@ -678,3 +678,282 @@ func TestDynamicTypeDataEncoding(t *testing.T) {
 		}
 	})
 }
+
+// staticTupleType returns the same shape as Uniswap V3's exactInputSingle
+// params: (address, address, uint24, address, uint256, uint256, uint160).
+// 7 static fields — the canonical bug repro.
+func staticTupleType(t *testing.T) abi.Type {
+	t.Helper()
+	abiType, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+		{Name: "tokenIn", Type: "address"},
+		{Name: "tokenOut", Type: "address"},
+		{Name: "fee", Type: "uint24"},
+		{Name: "recipient", Type: "address"},
+		{Name: "amountIn", Type: "uint256"},
+		{Name: "amountOutMinimum", Type: "uint256"},
+		{Name: "sqrtPriceLimitX96", Type: "uint160"},
+	})
+	if err != nil {
+		t.Fatalf("staticTupleType: %v", err)
+	}
+	return abiType
+}
+
+func TestTupleValue(t *testing.T) {
+	addrA := common.HexToAddress("0x000000000000000000000000000000000000000A")
+	addrB := common.HexToAddress("0x000000000000000000000000000000000000000B")
+	addrC := common.HexToAddress("0x000000000000000000000000000000000000000C")
+
+	t.Run("construction is unbound", func(t *testing.T) {
+		tv := Tuple(Address(addrA), big.NewInt(123))
+		if tv.Children() != nil {
+			t.Error("Children() should be nil before bind")
+		}
+		// Type() returns the zero abi.Type before bind.
+		if tv.Type().T != 0 || len(tv.Type().TupleElems) != 0 {
+			t.Error("Type() should be zero-value before bind")
+		}
+		if tv.IsDynamic() {
+			t.Error("TupleValue.IsDynamic() should be false (v1 static-only)")
+		}
+	})
+
+	t.Run("binds against matching tuple type", func(t *testing.T) {
+		tt := staticTupleType(t)
+		tv := Tuple(
+			Address(addrA),
+			Address(addrB),
+			MustLiteralFromType("uint24", big.NewInt(500)),
+			Address(addrC),
+			Uint256(big.NewInt(1_000_000)),
+			Uint256(big.NewInt(0)),
+			MustLiteralFromType("uint160", big.NewInt(0)),
+		)
+		if err := tv.bind(tt); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+		if got := len(tv.Children()); got != 7 {
+			t.Fatalf("Children() len = %d, want 7", got)
+		}
+		if tv.Type().String() != tt.String() {
+			t.Errorf("Type() = %s, want %s", tv.Type().String(), tt.String())
+		}
+	})
+
+	t.Run("rejects non-tuple expected type", func(t *testing.T) {
+		nonTuple, _ := abi.NewType("uint256", "", nil)
+		tv := Tuple(big.NewInt(1))
+		err := tv.bind(nonTuple)
+		if err == nil {
+			t.Fatal("expected error binding to non-tuple")
+		}
+		if _, ok := err.(*TypeMismatchError); !ok {
+			t.Errorf("expected *TypeMismatchError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("rejects field count mismatch", func(t *testing.T) {
+		tt := staticTupleType(t) // 7 fields
+		tv := Tuple(Address(addrA), big.NewInt(1))
+		if err := tv.bind(tt); err == nil {
+			t.Fatal("expected field-count mismatch error")
+		}
+	})
+
+	t.Run("rejects dynamic-leaf field", func(t *testing.T) {
+		dynLeaf, err := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "string"}, // dynamic
+		})
+		if err != nil {
+			t.Fatalf("type: %v", err)
+		}
+		tv := Tuple(big.NewInt(1), "hello")
+		err = tv.bind(dynLeaf)
+		if err == nil {
+			t.Fatal("expected error for dynamic leaf")
+		}
+		if !errorIs(err, ErrInvalidTupleField) {
+			t.Errorf("expected ErrInvalidTupleField, got: %v", err)
+		}
+	})
+
+	t.Run("rejects ReturnValue leaf", func(t *testing.T) {
+		// Construct a *ReturnValue manually (in-package).
+		rvType, _ := abi.NewType("uint256", "", nil)
+		rv := &ReturnValue{command: &Command{}, abiType: rvType}
+
+		// Two-field static tuple of (uint256, uint256).
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "uint256"},
+		})
+		tv := Tuple(big.NewInt(1), rv)
+		err := tv.bind(tt)
+		if err == nil {
+			t.Fatal("expected error for ReturnValue leaf")
+		}
+		if !errorIs(err, ErrInvalidTupleField) {
+			t.Errorf("expected ErrInvalidTupleField, got: %v", err)
+		}
+	})
+
+	t.Run("binds nested static tuple", func(t *testing.T) {
+		// outer: (uint256, (address, uint24))
+		inner, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "address"},
+			{Name: "b", Type: "uint24"},
+		})
+		outer, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "x", Type: "uint256"},
+			{Name: "inner", Type: "tuple", Components: []abi.ArgumentMarshaling{
+				{Name: "a", Type: "address"},
+				{Name: "b", Type: "uint24"},
+			}},
+		})
+		_ = inner
+
+		tv := Tuple(
+			big.NewInt(42),
+			Tuple(Address(addrA), MustLiteralFromType("uint24", big.NewInt(3000))),
+		)
+		if err := tv.bind(outer); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+		if len(tv.Children()) != 2 {
+			t.Fatalf("outer Children len = %d, want 2", len(tv.Children()))
+		}
+		innerChild, ok := tv.Children()[1].(*TupleValue)
+		if !ok {
+			t.Fatalf("inner child should be *TupleValue, got %T", tv.Children()[1])
+		}
+		if len(innerChild.Children()) != 2 {
+			t.Errorf("inner Children len = %d, want 2", len(innerChild.Children()))
+		}
+	})
+
+	t.Run("Data panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected panic from TupleValue.Data()")
+			}
+		}()
+		tv := Tuple(big.NewInt(1))
+		_ = tv.Data()
+	})
+
+	t.Run("idempotent bind same type", func(t *testing.T) {
+		tt := staticTupleType(t)
+		tv := Tuple(
+			Address(addrA),
+			Address(addrB),
+			MustLiteralFromType("uint24", big.NewInt(500)),
+			Address(addrC),
+			Uint256(big.NewInt(1)),
+			Uint256(big.NewInt(0)),
+			MustLiteralFromType("uint160", big.NewInt(0)),
+		)
+		if err := tv.bind(tt); err != nil {
+			t.Fatalf("first bind: %v", err)
+		}
+		if err := tv.bind(tt); err != nil {
+			t.Errorf("second bind with same type should be no-op, got: %v", err)
+		}
+	})
+}
+
+func TestNewLiteralStrictGuard(t *testing.T) {
+	t.Run("static tuple of static fields rejected", func(t *testing.T) {
+		// Two-field static tuple — packs to 64 bytes, > 32-byte slot.
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "uint256"},
+		})
+		// A Go struct shape that geth's ABI Pack accepts for this tuple.
+		val := struct {
+			A *big.Int
+			B *big.Int
+		}{big.NewInt(1), big.NewInt(2)}
+
+		_, err := NewLiteral(tt, val)
+		if err == nil {
+			t.Fatal("expected ErrStaticTupleTooLarge")
+		}
+		if !errorIs(err, ErrStaticTupleTooLarge) {
+			t.Errorf("expected ErrStaticTupleTooLarge, got: %v", err)
+		}
+	})
+
+	t.Run("dynamic tuple still works", func(t *testing.T) {
+		tt, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+			{Name: "a", Type: "uint256"},
+			{Name: "b", Type: "string"},
+		})
+		val := struct {
+			A *big.Int
+			B string
+		}{big.NewInt(1), "hello"}
+
+		lit, err := NewLiteral(tt, val)
+		if err != nil {
+			t.Fatalf("dynamic tuple should succeed, got: %v", err)
+		}
+		if !lit.IsDynamic() {
+			t.Error("dynamic tuple LiteralValue should report IsDynamic=true")
+		}
+	})
+}
+
+// errorIs walks the error chain looking for target. Avoids importing
+// errors here; matches the in-package style of comparing sentinels.
+func errorIs(err, target error) bool {
+	for err != nil {
+		if err == target {
+			return true
+		}
+		type unwrapper interface{ Unwrap() error }
+		if u, ok := err.(unwrapper); ok {
+			err = u.Unwrap()
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+func TestToValueTuple(t *testing.T) {
+	tt := staticTupleType(t)
+
+	t.Run("binds *TupleValue against expected tuple type", func(t *testing.T) {
+		addr := common.HexToAddress("0x000000000000000000000000000000000000000A")
+		tv := Tuple(
+			Address(addr),
+			Address(addr),
+			MustLiteralFromType("uint24", big.NewInt(500)),
+			Address(addr),
+			Uint256(big.NewInt(1)),
+			Uint256(big.NewInt(0)),
+			MustLiteralFromType("uint160", big.NewInt(0)),
+		)
+		got, err := toValue(tv, tt)
+		if err != nil {
+			t.Fatalf("toValue: %v", err)
+		}
+		gotTV, ok := got.(*TupleValue)
+		if !ok {
+			t.Fatalf("expected *TupleValue, got %T", got)
+		}
+		if len(gotTV.Children()) != 7 {
+			t.Errorf("Children() len = %d, want 7", len(gotTV.Children()))
+		}
+	})
+
+	t.Run("propagates bind errors", func(t *testing.T) {
+		nonTuple, _ := abi.NewType("uint256", "", nil)
+		tv := Tuple(big.NewInt(1))
+		_, err := toValue(tv, nonTuple)
+		if err == nil {
+			t.Fatal("expected error binding TupleValue to non-tuple type")
+		}
+	})
+}

@@ -19,12 +19,13 @@ import (
 
 // Mainnet contracts shared across the example fork tests.
 var (
-	mainnetWETH         = common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	mainnetUSDC         = common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
-	mainnetUniV2Router  = common.HexToAddress("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
+	mainnetWETH          = common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	mainnetUSDC          = common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	mainnetUniV2Router   = common.HexToAddress("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
 	mainnetUniV2WETHUSDC = common.HexToAddress("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
-	mainnetAaveV3Pool   = common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
-	mainnetAUSDC        = common.HexToAddress("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c")
+	mainnetAaveV3Pool    = common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
+	mainnetAUSDC         = common.HexToAddress("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c")
+	mainnetUniV3Router02 = common.HexToAddress("0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45")
 )
 
 const uniV2PairABI = `[
@@ -892,5 +893,188 @@ func TestForkCase7_AdvancedComposition(t *testing.T) {
 	if delta.Cmp(big.NewInt(1)) != 0 {
 		t.Errorf("expected user to receive exactly 1 NFT, got delta=%s", delta)
 	}
+}
+
+// uniV3Router02ABI captures SwapRouter02.exactInputSingle, which takes a
+// 7-field fully-static tuple parameter — the exact shape that triggered
+// the original "Static state variables must be 32 bytes" revert. The
+// regression below builds the params via weiroll.Tuple(...) and runs a
+// real WETH -> USDC swap through the VM. Without the per-field slot
+// expansion, the on-chain VM would reject the >32-byte static slot.
+const uniV3Router02ABI = `[
+	{
+		"name": "exactInputSingle",
+		"type": "function",
+		"stateMutability": "payable",
+		"inputs": [{
+			"name": "params",
+			"type": "tuple",
+			"components": [
+				{"name": "tokenIn",           "type": "address"},
+				{"name": "tokenOut",          "type": "address"},
+				{"name": "fee",               "type": "uint24"},
+				{"name": "recipient",         "type": "address"},
+				{"name": "amountIn",          "type": "uint256"},
+				{"name": "amountOutMinimum",  "type": "uint256"},
+				{"name": "sqrtPriceLimitX96", "type": "uint160"}
+			]
+		}],
+		"outputs": [{"name": "amountOut", "type": "uint256"}]
+	}
+]`
+
+// TestForkUniV3SwapStaticTupleInput is the on-chain regression for the
+// static-tuple-input bug. It builds a WETH -> USDC swap on Uniswap V3
+// SwapRouter02 (the same router from the original failure) using
+// weiroll.Tuple(...) for the 7-field static params struct, then executes
+// the plan via VM.execute.
+//
+// What this catches: if Tuple's per-field slot expansion regresses,
+// the params struct is packed as a single 224-byte LiteralValue with
+// no DynamicSlotFlag, and the VM reverts at CommandBuilder.sol:46
+// (`Static state variables must be 32 bytes`) before any real work
+// happens. A success path here proves the calldata layout the VM
+// assembles is byte-identical to what the router expects.
+func TestForkUniV3SwapStaticTupleInput(t *testing.T) {
+	pk, err := crypto.HexToECDSA(testPrivateKey)
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	client, auth, from := skipUnlessFork(t)
+	ctx := context.Background()
+
+	// Deploy WeirollVM.
+	setNonceAndGas(t, ctx, client, auth, from, 3_000_000)
+	vmAddr, err := deployContract(ctx, client, auth, pk, "WeirollVM")
+	if err != nil {
+		t.Fatalf("deploy WeirollVM: %v", err)
+	}
+	t.Logf("WeirollVM:        %s", vmAddr.Hex())
+	t.Logf("V3 SwapRouter02:  %s", mainnetUniV3Router02.Hex())
+
+	// Step 1: wrap 1 ETH on the test account.
+	wethABIParsed := weiroll.MustParseABI(wethABI)
+	wethBound := bind.NewBoundContract(mainnetWETH, wethABIParsed, client, client, client)
+
+	setNonceAndGas(t, ctx, client, auth, from, 200_000)
+	auth.Value = big.NewInt(1e18) // 1 ETH
+	tx, err := wethBound.Transact(auth, "deposit")
+	if err != nil {
+		t.Fatalf("WETH.deposit: %v", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		t.Fatalf("WETH.deposit mined: %v", err)
+	}
+	t.Log("Wrapped 1 ETH -> WETH on test account")
+
+	// Step 2: transfer 0.5 WETH to the VM (the VM will be the swap caller).
+	swapAmount := big.NewInt(5e17) // 0.5 WETH
+	setNonceAndGas(t, ctx, client, auth, from, 100_000)
+	tx, err = wethBound.Transact(auth, "transfer", vmAddr, swapAmount)
+	if err != nil {
+		t.Fatalf("WETH.transfer to VM: %v", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		t.Fatalf("WETH.transfer mined: %v", err)
+	}
+	t.Logf("Funded VM with %s wei WETH", swapAmount)
+
+	// Step 3: build the weiroll plan.
+	//   cmd[0]: WETH.approve(router, MAX) — VM grants the router pull rights.
+	//   cmd[1]: SwapRouter02.exactInputSingle(Tuple(...)) — the swap, with
+	//           the test EOA as recipient (ignored by VM, used by router).
+	weth := weiroll.NewContract(mainnetWETH, wethABIParsed)
+	router := weiroll.NewContract(mainnetUniV3Router02, weiroll.MustParseABI(uniV3Router02ABI))
+
+	planner := weiroll.New()
+	maxUint := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	planner.Add(weth.MustInvoke("approve", mainnetUniV3Router02, maxUint))
+
+	params := weiroll.Tuple(
+		weiroll.Address(mainnetWETH),                                  // tokenIn
+		weiroll.Address(mainnetUSDC),                                  // tokenOut
+		weiroll.MustLiteralFromType("uint24", big.NewInt(500)),        // fee = 0.05%
+		weiroll.Address(from),                                         // recipient
+		weiroll.Uint256(swapAmount),                                   // amountIn
+		weiroll.Uint256(big.NewInt(0)),                                // amountOutMinimum
+		weiroll.MustLiteralFromType("uint160", big.NewInt(0)),         // sqrtPriceLimitX96
+	)
+	planner.Add(router.MustInvoke("exactInputSingle", params))
+
+	plan, err := planner.Plan()
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	t.Logf("plan: %d commands, %d state slots", len(plan.Commands), len(plan.State))
+
+	// Sanity-check that command 1 is encoded as an extended command with
+	// 7 distinct static slot bytes — Tuple expansion must produce
+	// per-field slots; a regression would yield a single dynamic-flagged
+	// slot and the VM revert below would fire.
+	_, flags, argSlots, _, _, err := weiroll.DecodeCommand(plan.Commands[1])
+	if err != nil {
+		t.Fatalf("DecodeCommand: %v", err)
+	}
+	if !flags.IsExtended() {
+		t.Errorf("exactInputSingle should be an extended command (>6 args); flags=0x%02x", flags)
+	}
+	if len(argSlots) != 7 {
+		t.Errorf("argSlots len = %d, want 7", len(argSlots))
+	}
+	for i, s := range argSlots {
+		if s&weiroll.DynamicSlotFlag != 0 {
+			t.Errorf("argSlot[%d]=0x%02x has DynamicSlotFlag (must be static)", i, s)
+		}
+	}
+
+	// eth_call simulation first: surfaces any revert with the real
+	// error string (e.g. the static-slot-length revert if Tuple
+	// regressed) instead of the receipt-only "tx failed" path.
+	if err := simulateExecute(ctx, client, from, vmAddr, plan, big.NewInt(0)); err != nil {
+		t.Fatalf("simulateExecute reverted: %v", err)
+	}
+
+	// Capture USDC balance before, transact, capture after.
+	erc20 := weiroll.MustParseABI(erc20StdABI)
+	usdcBound := bind.NewBoundContract(mainnetUSDC, erc20, client, client, client)
+	var usdcBefore *big.Int
+	if err := usdcBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&usdcBefore}, "balanceOf", from); err != nil {
+		t.Fatalf("USDC.balanceOf before: %v", err)
+	}
+
+	vmABIParsed := weiroll.MustParseABI(weirollVMABI)
+	vmBound := bind.NewBoundContract(vmAddr, vmABIParsed, client, client, client)
+
+	setNonceAndGas(t, ctx, client, auth, from, 600_000)
+	tx, err = vmBound.Transact(auth, "execute",
+		plan.CommandsAsBytes32(), plan.StateAsBytes())
+	if err != nil {
+		t.Fatalf("VM.execute send: %v", err)
+	}
+	receipt, err := bind.WaitMined(ctx, client, tx)
+	if err != nil {
+		t.Fatalf("VM.execute mined: %v", err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		t.Fatalf("VM.execute reverted: status=%d gas=%d txhash=%s",
+			receipt.Status, receipt.GasUsed, receipt.TxHash.Hex())
+	}
+	t.Logf("VM.execute gas used: %d", receipt.GasUsed)
+
+	var usdcAfter *big.Int
+	if err := usdcBound.Call(&bind.CallOpts{Context: ctx},
+		&[]interface{}{&usdcAfter}, "balanceOf", from); err != nil {
+		t.Fatalf("USDC.balanceOf after: %v", err)
+	}
+	delta := new(big.Int).Sub(usdcAfter, usdcBefore)
+	t.Logf("USDC delta on recipient: %s (~%.2f USDC)", delta, float64(delta.Int64())/1e6)
+	if delta.Sign() <= 0 {
+		t.Fatalf("expected positive USDC delta, got %s", delta)
+	}
+
+	// Avoid linter complaints if a future change drops `time` usage.
+	_ = time.Second
 }
 

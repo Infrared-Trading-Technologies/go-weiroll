@@ -47,21 +47,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// MintParams matches Uniswap V3 NPM's mint() input tuple shape exactly.
-// Field order must match the ABI tuple components.
-type MintParams struct {
-	Token0         common.Address
-	Token1         common.Address
-	Fee            *big.Int
-	TickLower      *big.Int
-	TickUpper      *big.Int
-	Amount0Desired *big.Int
-	Amount1Desired *big.Int
-	Amount0Min     *big.Int
-	Amount1Min     *big.Int
-	Recipient      common.Address
-	Deadline       *big.Int
-}
+// NPM's mint() takes a fully-static 11-field tuple. The on-chain VM
+// requires every static state slot to be exactly 32 bytes, so the
+// tuple must be expanded into per-field slots — packing all 11 fields
+// (11*32 = 352 bytes) into one slot would revert at the VM's
+// `Static state variables must be 32 bytes` guard. The
+// expansion is done explicitly via weiroll.Tuple(...) below.
 
 // NPM ABI: mint (tuple-returning) and transferFrom (the downstream
 // consumer of the extracted tokenId). NPM is also an ERC721, so the
@@ -144,19 +135,23 @@ func main() {
 	// tokenId, all in the same weiroll tx.
 	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	weth := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-	mintParams := MintParams{
-		Token0:         usdc,
-		Token1:         weth,
-		Fee:            big.NewInt(500),
-		TickLower:      big.NewInt(-887220), // tick spacing 10 for fee 500
-		TickUpper:      big.NewInt(887220),
-		Amount0Desired: big.NewInt(1_000_000_000), // 1000 USDC, 6 decimals
-		Amount1Desired: big.NewInt(5e17),          // 0.5 WETH
-		Amount0Min:     big.NewInt(0),
-		Amount1Min:     big.NewInt(0),
-		Recipient:      vmAddr,
-		Deadline:       big.NewInt(2_000_000_000),
-	}
+
+	// Build the params tuple field-by-field. Each field becomes its
+	// own 32-byte state slot; weiroll.Tuple binds against the ABI
+	// tuple type pulled from the method signature at Invoke time.
+	mintParams := weiroll.Tuple(
+		weiroll.Address(usdc),
+		weiroll.Address(weth),
+		weiroll.MustLiteralFromType("uint24", big.NewInt(500)),
+		weiroll.MustLiteralFromType("int24", big.NewInt(-887220)), // tick spacing 10 for fee 500
+		weiroll.MustLiteralFromType("int24", big.NewInt(887220)),
+		weiroll.Uint256(big.NewInt(1_000_000_000)), // 1000 USDC, 6 decimals
+		weiroll.Uint256(big.NewInt(5e17)),          // 0.5 WETH
+		weiroll.Uint256(big.NewInt(0)),
+		weiroll.Uint256(big.NewInt(0)),
+		weiroll.Address(vmAddr),
+		weiroll.Uint256(big.NewInt(2_000_000_000)),
+	)
 
 	// Step 1: mint with .RawReturn(). The slot now holds the entire
 	// 128-byte returndata as bytes. mintRaw.Type() == "bytes".

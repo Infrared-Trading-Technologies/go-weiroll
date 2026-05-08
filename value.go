@@ -1,6 +1,7 @@
 package weiroll
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -169,6 +170,146 @@ func (v *StateValue) Data() []byte {
 	return nil
 }
 
+// TupleValue represents a static tuple expanded into per-field state
+// slots. Unlike LiteralValue, which occupies a single state slot,
+// TupleValue allocates one slot per leaf field at planning time. This
+// matches the on-chain VM's invariant that every static slot is 32
+// bytes; a fully-static N-field tuple is 32*N bytes total and must be
+// split into N slots.
+//
+// TupleValue is created via Tuple(...) and bound to the expected ABI
+// type when used as a function argument. v1 supports only fully-static
+// tuples; dynamic leaves and *ReturnValue / *StateValue / *SubplanValue
+// inside a tuple are rejected at bind time.
+type TupleValue struct {
+	abiType  abi.Type
+	children []Value // populated by bind; nil before bind
+	raw      []any   // input fields; nil after bind
+}
+
+func (v *TupleValue) isValue() {}
+
+// IsDynamic returns false. TupleValue v1 only supports static tuples;
+// dynamic-leaf tuples are rejected at bind time.
+func (v *TupleValue) IsDynamic() bool {
+	return false
+}
+
+// Type returns the bound ABI tuple type, or the zero abi.Type if the
+// value has not yet been bound (i.e. used as an argument).
+func (v *TupleValue) Type() abi.Type {
+	return v.abiType
+}
+
+// Data panics. TupleValue is multi-slot and has no single-slot
+// encoding; the planner allocates per-field slots via
+// stateManager.getSlotsForValue. A panic surfaces accidental leakage
+// into single-slot paths (e.g. literal dedup) loudly instead of
+// silently corrupting state.
+func (v *TupleValue) Data() []byte {
+	panic("weiroll: TupleValue has no single-slot data; the planner allocates per-field slots via getSlotsForValue")
+}
+
+// Children returns the bound child values (one per tuple field). Nil
+// before bind. Children of a nested static tuple are themselves
+// *TupleValue; leaf fields are *LiteralValue.
+func (v *TupleValue) Children() []Value {
+	return v.children
+}
+
+// Tuple constructs an unbound TupleValue from a sequence of field
+// values. Each field can be either a Value (e.g. *LiteralValue,
+// *TupleValue for nesting) or a raw Go value (common.Address, *big.Int,
+// etc.) that will be converted against the corresponding ABI tuple
+// element type at bind time.
+//
+// Use Tuple when a contract method takes a fully-static tuple
+// parameter — e.g. Uniswap V3's exactInputSingle params struct. Tuple
+// expands into one state slot per leaf field, satisfying the VM's
+// 32-byte static-slot invariant.
+//
+// v1 limitations: leaves must be static literal types. *ReturnValue,
+// *StateValue, *SubplanValue, and dynamic ABI types are rejected at
+// bind time. Dynamic tuples (containing any dynamic field) should be
+// passed as a single literal via the existing path.
+func Tuple(fields ...any) *TupleValue {
+	raw := make([]any, len(fields))
+	copy(raw, fields)
+	return &TupleValue{raw: raw}
+}
+
+// MustTuple is like Tuple. Provided for API symmetry with MustLiteral;
+// it cannot fail at construction (binding errors surface only when the
+// value is used as an argument).
+func MustTuple(fields ...any) *TupleValue {
+	return Tuple(fields...)
+}
+
+// bind resolves the unbound raw fields against expectedType (which
+// must be a fully-static tuple type) and populates children. Calling
+// bind twice with the same type is a no-op; calling bind on an
+// already-bound TupleValue with a different type returns a
+// TypeMismatchError.
+func (v *TupleValue) bind(expectedType abi.Type) error {
+	if v.children != nil {
+		if v.abiType.String() != expectedType.String() {
+			return &TypeMismatchError{
+				Expected: expectedType.String(),
+				Got:      v.abiType.String(),
+			}
+		}
+		return nil
+	}
+
+	if expectedType.T != abi.TupleTy {
+		return &TypeMismatchError{
+			Expected: expectedType.String(),
+			Got:      "tuple",
+		}
+	}
+
+	if len(v.raw) != len(expectedType.TupleElems) {
+		return fmt.Errorf(
+			"weiroll: Tuple field count %d does not match expected tuple arity %d for %s",
+			len(v.raw), len(expectedType.TupleElems), expectedType.String(),
+		)
+	}
+
+	children := make([]Value, len(v.raw))
+	for i, rawField := range v.raw {
+		elemType := *expectedType.TupleElems[i]
+
+		if isDynamicType(elemType) {
+			return &EncodingError{Value: rawField, Err: ErrInvalidTupleField}
+		}
+
+		switch f := rawField.(type) {
+		case *ReturnValue:
+			return &EncodingError{Value: f, Err: ErrInvalidTupleField}
+		case *StateValue:
+			return &EncodingError{Value: f, Err: ErrInvalidTupleField}
+		case *SubplanValue:
+			return &EncodingError{Value: f, Err: ErrInvalidTupleField}
+		case *TupleValue:
+			if err := f.bind(elemType); err != nil {
+				return err
+			}
+			children[i] = f
+		default:
+			child, err := toValue(rawField, elemType)
+			if err != nil {
+				return err
+			}
+			children[i] = child
+		}
+	}
+
+	v.abiType = expectedType
+	v.children = children
+	v.raw = nil
+	return nil
+}
+
 // SubplanValue wraps a nested Planner for use as an argument.
 type SubplanValue struct {
 	subplanner *Planner
@@ -234,6 +375,14 @@ func NewLiteral(abiType abi.Type, value any) (*LiteralValue, error) {
 	data, err := args.Pack(convertedValue)
 	if err != nil {
 		return nil, &EncodingError{Value: value, Err: err}
+	}
+
+	// A static type that packs to >32 bytes (most commonly a fully-static
+	// tuple struct) cannot fit in a single state slot — the on-chain VM
+	// asserts every static slot is exactly 32 bytes. Reject here and
+	// point the caller at weiroll.Tuple to expand into per-field slots.
+	if !isDynamicType(abiType) && len(data) > 32 {
+		return nil, &EncodingError{Value: value, Err: ErrStaticTupleTooLarge}
 	}
 
 	// For dynamic types, skip the offset prefix (first 32 bytes)
@@ -347,6 +496,15 @@ func isValue(v any) bool {
 
 // toValue converts any value to a Value, creating a LiteralValue if needed.
 func toValue(v any, expectedType abi.Type) (Value, error) {
+	// *TupleValue is checked first: an unbound TupleValue has an empty
+	// Type() that would falsely fail the generic type-equality check
+	// below. Bind here while expectedType is in scope.
+	if tv, ok := v.(*TupleValue); ok {
+		if err := tv.bind(expectedType); err != nil {
+			return nil, err
+		}
+		return tv, nil
+	}
 	if val, ok := v.(Value); ok {
 		// Type checking
 		if val.Type().String() != expectedType.String() {

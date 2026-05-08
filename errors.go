@@ -31,6 +31,19 @@ var (
 
 	// ErrNoReturnValue indicates the function has no return value to capture.
 	ErrNoReturnValue = errors.New("weiroll: function has no return value")
+
+	// ErrStaticTupleTooLarge indicates a static tuple was packed into a
+	// single state slot and exceeds the 32-byte slot size enforced by the
+	// on-chain VM. Use weiroll.Tuple(field1, field2, ...) to flatten the
+	// tuple into per-field state slots.
+	ErrStaticTupleTooLarge = errors.New(
+		"weiroll: static tuple exceeds 32-byte slot — use weiroll.Tuple(field1, field2, ...) to expand into per-field state slots")
+
+	// ErrInvalidTupleField indicates a leaf inside weiroll.Tuple has an
+	// unsupported type. v1 supports only static literal fields; dynamic
+	// types and *ReturnValue/*StateValue/*SubplanValue are rejected.
+	ErrInvalidTupleField = errors.New(
+		"weiroll: invalid leaf type inside weiroll.Tuple (v1 supports only static literal fields)")
 )
 
 // MethodNotFoundError indicates the contract doesn't have the requested method.
