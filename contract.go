@@ -12,11 +12,8 @@ import (
 type ContractType uint8
 
 const (
-	// Library contracts are called via DELEGATECALL.
-	Library ContractType = iota
-
 	// External contracts are called via CALL.
-	External
+	External ContractType = iota
 
 	// StaticExternal contracts are called via STATICCALL.
 	StaticExternal
@@ -37,21 +34,6 @@ func WithStaticCalls() ContractOption {
 	return func(c *Contract) {
 		c.contractType = StaticExternal
 	}
-}
-
-// NewLibrary creates a Contract wrapper for library contracts.
-// Library contracts are called via DELEGATECALL, meaning they execute
-// in the context of the weiroll VM contract.
-func NewLibrary(address common.Address, contractABI abi.ABI, opts ...ContractOption) *Contract {
-	c := &Contract{
-		address:      address,
-		abi:          contractABI,
-		contractType: Library,
-	}
-	for _, opt := range opts {
-		opt(c)
-	}
-	return c
 }
 
 // NewContract creates a Contract wrapper for external contracts.
@@ -121,8 +103,6 @@ func (c *Contract) MethodNames() []string {
 // defaultFlags returns the default call flags based on contract type.
 func (c *Contract) defaultFlags() CallFlags {
 	switch c.contractType {
-	case Library:
-		return FlagDelegateCall
 	case StaticExternal:
 		return FlagStaticCall
 	default:

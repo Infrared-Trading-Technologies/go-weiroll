@@ -16,7 +16,7 @@ func TestCommandEncoderEncode(t *testing.T) {
 	argSlots := []uint8{0, 1, 2}
 	returnSlot := uint8(3)
 
-	cmd := encoder.Encode(selector, FlagDelegateCall, argSlots, returnSlot, address)
+	cmd := encoder.Encode(selector, FlagCall, argSlots, returnSlot, address)
 
 	t.Run("command size", func(t *testing.T) {
 		if len(cmd) != CommandSize {
@@ -31,8 +31,8 @@ func TestCommandEncoderEncode(t *testing.T) {
 	})
 
 	t.Run("flags encoding", func(t *testing.T) {
-		if cmd[4] != byte(FlagDelegateCall) {
-			t.Errorf("Expected flag %d, got %d", FlagDelegateCall, cmd[4])
+		if cmd[4] != byte(FlagCall) {
+			t.Errorf("Expected flag %d, got %d", FlagCall, cmd[4])
 		}
 	})
 
@@ -73,7 +73,6 @@ func TestCommandEncoderEncodeAllFlags(t *testing.T) {
 		name  string
 		flags CallFlags
 	}{
-		{"DelegateCall", FlagDelegateCall},
 		{"Call", FlagCall},
 		{"StaticCall", FlagStaticCall},
 		{"CallWithValue", FlagCallWithValue},
@@ -280,7 +279,6 @@ func TestCallFlagsMethods(t *testing.T) {
 			flags    CallFlags
 			expected CallFlags
 		}{
-			{FlagDelegateCall, FlagDelegateCall},
 			{FlagCall, FlagCall},
 			{FlagStaticCall, FlagStaticCall},
 			{FlagCallWithValue, FlagCallWithValue},
@@ -301,7 +299,6 @@ func TestCallFlagsMethods(t *testing.T) {
 			expected bool
 		}{
 			{FlagCall, false},
-			{FlagDelegateCall, false},
 			{FlagExtendedCommand, true},
 			{FlagCall | FlagExtendedCommand, true},
 			{FlagTupleReturn, false},
@@ -433,9 +430,6 @@ func TestConstants(t *testing.T) {
 	})
 
 	t.Run("flag values", func(t *testing.T) {
-		if FlagDelegateCall != 0x00 {
-			t.Errorf("Expected FlagDelegateCall=0x00, got %d", FlagDelegateCall)
-		}
 		if FlagCall != 0x01 {
 			t.Errorf("Expected FlagCall=0x01, got %d", FlagCall)
 		}
@@ -448,11 +442,11 @@ func TestConstants(t *testing.T) {
 		if FlagCallTypeMask != 0x03 {
 			t.Errorf("Expected FlagCallTypeMask=0x03, got %d", FlagCallTypeMask)
 		}
-		if FlagExtendedCommand != 0x80 {
-			t.Errorf("Expected FlagExtendedCommand=0x80, got %d", FlagExtendedCommand)
+		if FlagExtendedCommand != 0x40 {
+			t.Errorf("Expected FlagExtendedCommand=0x40, got %d", FlagExtendedCommand)
 		}
-		if FlagTupleReturn != 0x40 {
-			t.Errorf("Expected FlagTupleReturn=0x40, got %d", FlagTupleReturn)
+		if FlagTupleReturn != 0x80 {
+			t.Errorf("Expected FlagTupleReturn=0x80, got %d", FlagTupleReturn)
 		}
 	})
 }
@@ -501,7 +495,7 @@ func TestEncodeCommandRoundtrip(t *testing.T) {
 		{
 			name:       "no args no return",
 			selector:   [4]byte{0xAA, 0xBB, 0xCC, 0xDD},
-			flags:      FlagDelegateCall,
+			flags:      FlagCall,
 			argSlots:   nil,
 			returnSlot: NoReturnSlot,
 			address:    common.Address{},

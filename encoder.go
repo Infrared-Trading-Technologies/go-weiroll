@@ -38,9 +38,6 @@ const (
 type CallFlags uint8
 
 const (
-	// FlagDelegateCall uses DELEGATECALL (for library contracts).
-	FlagDelegateCall CallFlags = 0x00
-
 	// FlagCall uses regular CALL (for external contracts).
 	FlagCall CallFlags = 0x01
 
@@ -53,11 +50,11 @@ const (
 	// FlagCallTypeMask masks the call type bits.
 	FlagCallTypeMask CallFlags = 0x03
 
-	// FlagTupleReturn wraps multi-return values as raw bytes.
-	FlagTupleReturn CallFlags = 0x40
+	// FlagExtendedCommand indicates an extended command (>6 args). Bit 6.
+	FlagExtendedCommand CallFlags = 0x40
 
-	// FlagExtendedCommand indicates an extended command (>6 args).
-	FlagExtendedCommand CallFlags = 0x80
+	// FlagTupleReturn wraps multi-return values as raw bytes. Bit 7.
+	FlagTupleReturn CallFlags = 0x80
 )
 
 // CallType returns just the call type portion of the flags.

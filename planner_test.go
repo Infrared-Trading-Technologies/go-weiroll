@@ -199,7 +199,7 @@ func TestPlannerAdd(t *testing.T) {
 func TestPlannerChaining(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	t.Run("chains return values", func(t *testing.T) {
 		p := New()
@@ -466,7 +466,7 @@ func TestPlannerForEachCommand(t *testing.T) {
 func TestPlannerPlan(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	t.Run("compiles simple plan", func(t *testing.T) {
 		p := New()
@@ -547,7 +547,7 @@ func TestPlannerPlan(t *testing.T) {
 func TestPlannerPlanWithSlotOptimization(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	t.Run("optimization enabled recycles slots", func(t *testing.T) {
 		p := New()
@@ -599,7 +599,7 @@ func TestPlannerPlanWithSlotOptimization(t *testing.T) {
 func TestCompiledPlan(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	p := New()
 	p.Add(lib.MustInvoke("add", big.NewInt(100), big.NewInt(200)))
@@ -706,7 +706,7 @@ func TestPlannerClone(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
 	contract := NewContract(addr, testABI)
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	t.Run("empty planner clones to empty planner", func(t *testing.T) {
 		p := New()
@@ -907,7 +907,7 @@ func TestPlannerClone(t *testing.T) {
 		// clone path's TupleValue child-rewrite is exercised end-to-end.
 		chained := MustParseABI(chainedTupleABI)
 		c2 := NewContract(addr, chained)
-		l2 := NewLibrary(addr, chained)
+		l2 := NewContract(addr, chained)
 
 		p := New()
 		sum := p.Add(l2.MustInvoke("add", big.NewInt(1), big.NewInt(2)))
@@ -982,7 +982,7 @@ func TestPlannerClone(t *testing.T) {
 func TestPlannerClone_ConcurrentPlan(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	build := func() *Planner {
 		p := New()
@@ -1044,7 +1044,7 @@ func equalCompiledPlans(a, b *CompiledPlan) bool {
 func TestVisibilityAnalysis(t *testing.T) {
 	testABI := plannerTestABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-	lib := NewLibrary(addr, testABI)
+	lib := NewContract(addr, testABI)
 
 	t.Run("tracks last usage of return values", func(t *testing.T) {
 		p := New()
@@ -1228,7 +1228,7 @@ const chainedTupleABI = `[
 func TestPlanWithChainedReturnValueInTuple(t *testing.T) {
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
 	contract := NewContract(addr, MustParseABI(chainedTupleABI))
-	lib := NewLibrary(addr, MustParseABI(chainedTupleABI))
+	lib := NewContract(addr, MustParseABI(chainedTupleABI))
 
 	p := New()
 	sum := p.Add(lib.MustInvoke("add", big.NewInt(1), big.NewInt(2)))

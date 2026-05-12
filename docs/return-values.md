@@ -185,11 +185,8 @@ fork test `TestForkCase6_SelfBalancePattern`.
 
 Real recipes interleave them: dynamic-return extraction (Case 5)
 feeds a tuple-returning call whose tuple field (Case 4) feeds a
-self-balance read (Case 6). See
-[examples/07_advanced_composition](../examples/07_advanced_composition/main.go)
-and fork test `TestForkCase7_AdvancedComposition` for a recipe that
-zaps ETH into a Uniswap V3 LP NFT in one tx, with three "hard to get"
-return values flowing through.
+self-balance read (Case 6). Compose by piping the `*ReturnValue` from
+one case directly into the consuming command of the next.
 
 ## `ReturnValue.As`
 
@@ -212,20 +209,18 @@ blob is shaped like an array.
 metadata. For real numeric conversions (e.g., `int128` to `uint256`
 with sign extension), you still need a Solidity helper.
 
-## Tuple-input limitation
+## Tuple-input handling
 
-NPM.mint and similar tuple-input methods accept a single ABI tuple
-parameter. go-weiroll encodes a Go struct as one literal slot, so you
-cannot bind individual tuple fields to separate `*ReturnValue`s. The
-standard workaround is a tiny library contract that re-exposes the
-function with FLAT arguments — one per ABI word — registered via
-`weiroll.NewLibrary` (DELEGATECALL).
+For fully-static tuple inputs (e.g. Uniswap V3 `SwapRouter02.exactInputSingle`'s
+7-field params struct), use `weiroll.Tuple(field1, field2, ...)` — the planner
+expands the tuple into per-field state slots so each component can be a literal
+or a `*ReturnValue`. See `integration/examples_fork_test.go:TestForkUniV3SwapStaticTupleInput`
+for the canonical pattern.
 
-Example: [integration/contracts/MintAdapter.sol](../integration/contracts/MintAdapter.sol)
-wraps `NPM.mint` with eleven flat arguments so each amount can come
-from its own slot. Used in
-[examples/07_advanced_composition](../examples/07_advanced_composition/main.go)
-to pipe a swap output into `amount0Desired`.
+For mixed static/dynamic or fully-dynamic tuple inputs that the planner cannot
+expand, write a tiny flattening adapter contract that re-exposes the function
+with flat arguments and have the VM `approve(adapter, amount)` first so the
+adapter can pull tokens via a regular CALL (the VM has no DELEGATECALL dispatcher).
 
 ## RawReturn slot encoding
 

@@ -125,7 +125,7 @@ func main() {
 	user := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")        // who gets the NFT
 
 	npm := weiroll.NewContract(npmAddr, weiroll.MustParseABI(npmABI))
-	helper := weiroll.NewLibrary(helperAddr, weiroll.MustParseABI(tupleHelperABI))
+	helper := weiroll.NewContract(helperAddr, weiroll.MustParseABI(tupleHelperABI))
 
 	planner := weiroll.New()
 

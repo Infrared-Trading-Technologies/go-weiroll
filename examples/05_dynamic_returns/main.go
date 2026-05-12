@@ -81,7 +81,7 @@ func main() {
 	recipient := common.HexToAddress("0xCAFECAFECAFECAFECAFECAFECAFECAFECAFECAFE")
 
 	uniV2 := weiroll.NewContract(router, weiroll.MustParseABI(uniV2RouterABI))
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 	usdcToken := weiroll.NewContract(usdc, weiroll.MustParseABI(erc20ABI))
 
 	planner := weiroll.New()

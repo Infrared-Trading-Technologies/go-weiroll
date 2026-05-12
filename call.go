@@ -176,18 +176,10 @@ func (c *Call) clone() *Call {
 func (c *Call) validate() error {
 	callType := c.flags.CallType()
 
-	// Value transfer only valid for CALL_WITH_VALUE
+	// Value transfer only valid for CALL_WITH_VALUE. This subsumes the
+	// "STATICCALL can't send value" check because FlagStaticCall (0x02) is
+	// not FlagCallWithValue (0x03).
 	if c.value != nil && c.value.Sign() > 0 && callType != FlagCallWithValue {
-		return ErrInvalidCallType
-	}
-
-	// DELEGATECALL can't send value
-	if callType == FlagDelegateCall && c.value != nil && c.value.Sign() > 0 {
-		return ErrInvalidCallType
-	}
-
-	// STATICCALL can't send value
-	if callType == FlagStaticCall && c.value != nil && c.value.Sign() > 0 {
 		return ErrInvalidCallType
 	}
 

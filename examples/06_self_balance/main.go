@@ -172,7 +172,7 @@ func main() {
 	usdc := weiroll.NewContract(usdcAddr, weiroll.MustParseABI(erc20ABI))
 	uniV2 := weiroll.NewContract(router, weiroll.MustParseABI(uniV2RouterABI))
 	aave := weiroll.NewContract(pool, weiroll.MustParseABI(aaveV3PoolABI))
-	math := weiroll.NewLibrary(mathAddr, weiroll.MustParseABI(mathLibABI))
+	math := weiroll.NewContract(mathAddr, weiroll.MustParseABI(mathLibABI))
 
 	planner := weiroll.New()
 

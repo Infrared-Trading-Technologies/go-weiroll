@@ -8,7 +8,7 @@ Weiroll is a virtual machine that batches Ethereum operations via a scripted com
 
 - Chain multiple contract calls into a single atomic transaction
 - Pass return values between operations without separate transactions
-- Support DELEGATECALL (libraries), CALL, STATICCALL, and CALL_WITH_VALUE
+- Support CALL, STATICCALL, and CALL_WITH_VALUE
 
 ## Installation
 
@@ -38,10 +38,7 @@ func main() {
     mathABI := weiroll.MustParseABI(mathABIJSON)
     tokenABI := weiroll.MustParseABI(tokenABIJSON)
 
-    // Wrap contracts. Pure/view helpers don't need VM context — use
-    // NewContract (CALL). NewLibrary (DELEGATECALL) is only for helpers
-    // that must act AS the VM (msg.sender to downstream calls = VM,
-    // address(this) = VM). See "Contract Types" for the full rule.
+    // Wrap contracts. All targets are called via CALL.
     math := weiroll.NewContract(mathLibAddr, mathABI)      // CALL
     token := weiroll.NewContract(tokenAddr, tokenABI)      // CALL
 
@@ -68,21 +65,15 @@ func main() {
 
 ### Contract Types
 
-- **Library** (`NewLibrary`): DELEGATECALL. Code runs in the VM's storage/context — `address(this)` is the VM, `msg.sender` to downstream calls is the VM, ERC-20 approvals + balances are the VM's.
 - **External** (`NewContract`): CALL. The target gets its own frame.
+- **Static** (`NewContract` with `WithStaticCalls()`): STATICCALL by default.
 
 ```go
-lib := weiroll.NewLibrary(addr, abi)                       // DELEGATECALL
-contract := weiroll.NewContract(addr, abi)                 // CALL
+contract := weiroll.NewContract(addr, abi)                            // CALL
 readOnly := weiroll.NewContract(addr, abi, weiroll.WithStaticCalls()) // STATICCALL default
 ```
 
-**Picking between them — gotcha worth knowing.** DELEGATECALL preserves `CALLVALUE` from the outer `execute()` frame. If your plan ever runs with `msg.value > 0` (e.g. a `WETH.deposit().WithValue(...)` command), Solidity's nonpayable dispatcher on every `pure`/`view`/default-mutability function in a delegatecall target reverts with empty data — the VM surfaces that as `ExecutionFailed(_, _, "Unknown")`.
-
-Rule of thumb:
-
-- Pure/view helpers (math, decoders, formatters) → `NewContract`. They don't need VM context, and CALL keeps their frame at `msg.value = 0` so the dispatcher check passes.
-- Helpers that must act AS the VM (e.g. an adapter calling a router with the VM's approvals) → `NewLibrary`, and mark the target function `external payable` with an `address(this) != _SELF` direct-call guard. See `integration/contracts/MintAdapter.sol` for the canonical pattern.
+The VM rejects `FLAG_CT_DELEGATECALL` (0x00) with `revert("Invalid calltype")`. Any helper that previously needed DELEGATECALL semantics (acting AS the VM, using its approvals) must be reworked: have the VM `approve(adapter, amount)` before the adapter call so the adapter can pull tokens via standard CALL.
 
 ### Call Modifiers
 
@@ -146,11 +137,11 @@ Commands are encoded as 32-byte (standard) or 64-byte (extended for >6 args) pac
 
 **Extended (>6 args):**
 ```
-Word 1: [selector:4][flags|0x80:1][0xff×6:6][return:1][address:20]
+Word 1: [selector:4][flags|0x40:1][0xff×6:6][return:1][address:20]
 Word 2: [up to 32 arg slots, 0xff-padded]
 ```
 
-The VM reads `indices = commands[i+1]` for extended commands — Word 1's input bytes are not used for arg routing and are filled with `0xff`. Flag bits: `0x80 = EXTENDED`, `0x40 = TUPLE_RETURN` (RawReturn), `0x03` mask = call type (`0x00` DELEGATECALL, `0x01` CALL, `0x02` STATICCALL, `0x03` CALL_WITH_VALUE).
+The VM reads `indices = commands[i+1]` for extended commands — Word 1's input bytes are not used for arg routing and are filled with `0xff`. Flag bits: `0x40 = EXTENDED`, `0x80 = TUPLE_RETURN` (RawReturn), `0x03` mask = call type (`0x01` CALL, `0x02` STATICCALL, `0x03` CALL_WITH_VALUE). `0x00` is reserved and rejected by the VM.
 
 ## State Management
 
@@ -182,11 +173,11 @@ go test -v ./...
 ./integration/run_test.sh --fork --rpc "$MAINNET_RPC_URL"
 ```
 
-The fork tests under `integration/examples_fork_test.go` double as worked examples for the patterns above (pre-funded VM, inline-ETH + pure helpers, inline-ETH + delegatecall adapter). See [`integration/README.md`](./integration/README.md) for the test inventory.
+The fork tests under `integration/examples_fork_test.go` double as worked examples for the patterns above (pre-funded VM, inline-ETH + pure helpers). See [`integration/README.md`](./integration/README.md) for the test inventory.
 
 ## Examples
 
-See the [examples](./examples) directory for usage examples organized by case number (01_simple_return through 07_advanced_composition).
+See the [examples](./examples) directory for usage examples organized by case number (01_simple_return through 06_self_balance), plus the `basic`, `uniswap-v2-swap`, and `weth-wrap-unwrap` walkthroughs.
 
 ## License
 

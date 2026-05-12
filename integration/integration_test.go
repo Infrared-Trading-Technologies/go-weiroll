@@ -207,7 +207,7 @@ func TestMathValueChaining(t *testing.T) {
 
 	// Create weiroll plan using our library
 	mathABI := weiroll.MustParseABI(mathLibABI)
-	mathLib := weiroll.NewLibrary(mathLibAddr, mathABI)
+	mathLib := weiroll.NewContract(mathLibAddr, mathABI)
 
 	planner := weiroll.New()
 
@@ -568,7 +568,7 @@ func TestMainnetForkUniswapV2Swap(t *testing.T) {
 	// Create weiroll contracts pointing to real mainnet contracts
 	weth := weiroll.NewContract(wethAddr, parsedWethABI)
 	router := weiroll.NewContract(routerAddr, weiroll.MustParseABI(uniswapV2RouterABI))
-	mathLib := weiroll.NewLibrary(mathLibAddr, weiroll.MustParseABI(mathLibABI))
+	mathLib := weiroll.NewContract(mathLibAddr, weiroll.MustParseABI(mathLibABI))
 
 	// ERC20 ABI for USDC balance check
 	erc20ABI := weiroll.MustParseABI(`[
@@ -838,7 +838,6 @@ func TestMainnetForkMultiHopSwap(t *testing.T) {
 	// Create weiroll contracts
 	weth := weiroll.NewContract(wethAddr, parsedWethABI)
 	router := weiroll.NewContract(routerAddr, weiroll.MustParseABI(uniswapV2RouterABI))
-	// Use NewContract (CALL) instead of NewLibrary (DELEGATECALL) to debug
 	mathLib := weiroll.NewContract(mathLibAddr, weiroll.MustParseABI(mathLibABI))
 
 	// ERC20 ABI for approvals

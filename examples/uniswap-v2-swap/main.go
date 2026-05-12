@@ -117,7 +117,7 @@ func main() {
 	router := weiroll.NewContract(uniswapRouter, routerABI)
 	wethToken := weiroll.NewContract(weth, tokenABI)
 	usdcToken := weiroll.NewContract(usdc, tokenABI)
-	helper := weiroll.NewLibrary(helperLib, helperABI) // DELEGATECALL for helper
+	helper := weiroll.NewContract(helperLib, helperABI)
 
 	// Create planner
 	planner := weiroll.New()

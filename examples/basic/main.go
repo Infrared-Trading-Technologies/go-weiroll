@@ -65,11 +65,8 @@ func main() {
 	tokenAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	recipientAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 
-	// Create contract wrappers
-	// NewLibrary for contracts called via DELEGATECALL
-	mathLib := weiroll.NewLibrary(mathLibAddr, mathABI)
-
-	// NewContract for regular external contracts
+	// Create contract wrappers. Pure-compute helpers are CALL'd.
+	mathLib := weiroll.NewContract(mathLibAddr, mathABI)
 	token := weiroll.NewContract(tokenAddr, erc20ABI)
 
 	// Create a new planner

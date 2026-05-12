@@ -50,19 +50,13 @@ These mirror `../examples/01..07` and are the reference patterns for writing rea
 - **TestForkCase4_TupleReturnRoundTrip** — `RawReturn` + `TupleHelper.extract` + `MustAsType` to read individual fields out of a multi-return ABI output (UniV2 pair `getReserves`).
 - **TestForkCase6_SelfBalancePattern** — inline ETH + pure helpers: wrap, swap, `extractLastElement`, approve Aave, supply. The "self-balance" probe is a no-op visibility prod.
 - **TestForkCase3_AaveSupplyAndATokenRead** — same shape as case 6, then reads aUSDC.balanceOf(VM) post-supply and pipes it into a downstream consumer.
-- **TestForkCase7_AdvancedComposition** — the "everything" recipe: inline ETH wrap, swap, mint a UniV3 LP NFT via a delegatecall adapter, extract the tokenId, ship the NFT to the user. Documents the "inline-ETH + delegatecall adapter" convention (`payable` + `_SELF` guard on the adapter).
 
-### Three patterns the fork tests demonstrate
+### Two patterns the fork tests demonstrate
 
 | Pattern | Tests | Notes |
 |---|---|---|
 | Pre-funded VM, value=0 | UniswapV2Swap, MultiHopSwap, Case4, Case1 | Cleanest contract surface; multi-tx UX or pre-existing balances. |
-| Inline ETH, only pure helpers | Case6, Case3 | Pure helpers must register as `NewContract` (CALL), not `NewLibrary`. |
-| Inline ETH + must-delegatecall adapter | Case7 | Adapter must be `external payable` with the `address(this) != _SELF` guard. |
-
-```bash
-./run_test.sh --fork --rpc $MAINNET_RPC_URL --test TestForkCase7_AdvancedComposition
-```
+| Inline ETH, only pure helpers | Case6, Case3 | All helpers register as `NewContract` (CALL); the VM has no DELEGATECALL path. |
 
 ## Real Mainnet Contracts Used
 
@@ -79,7 +73,6 @@ These mirror `../examples/01..07` and are the reference patterns for writing rea
 - `contracts/CommandBuilder.sol` — input-encoding + output-writing library used by the VM.
 - `contracts/MathLib.sol` — pure math helpers + `extractLastElement(uint256[])`. Registered with `NewContract` (CALL).
 - `contracts/TupleHelper.sol` — `extract(bytes,uint256) → bytes32` for decoding `RawReturn` blobs. Registered with `NewContract`.
-- `contracts/MintAdapter.sol` — flattens UniV3 NPM `mint(MintParams)` into 11 primitive args so weiroll can pipe individual values in. Registered with `NewLibrary` (DELEGATECALL); marked `external payable` with an `address(this) != _SELF` direct-call guard. See its top-of-file docs for the full convention.
 
 ## Manual Testing
 
@@ -130,5 +123,5 @@ Transaction successful! Gas used: 52476
 
 1. Add the test to `examples_fork_test.go` and gate it with `skipUnlessFork(t)`.
 2. Decide your funding pattern (pre-funded vs inline ETH) — see the patterns table above.
-3. Pick `NewLibrary` vs `NewContract` per the rule in the top-level [README](../README.md#contract-types). For helpers that must delegate but the plan also carries `msg.value`, use the `MintAdapter` convention (`external payable` + `_SELF` guard).
+3. All helpers register with `NewContract` (CALL or STATICCALL); the VM rejects `FLAG_CT_DELEGATECALL` with `revert("Invalid calltype")`.
 4. Before `bind.Transact`, call `simulateExecute` (defined at the top of `examples_fork_test.go`) so a revert surfaces the failing command index + reason via the VM's `ExecutionFailed` custom error. Without it, `bind.Transact` only reports `status=0 gas=N`.

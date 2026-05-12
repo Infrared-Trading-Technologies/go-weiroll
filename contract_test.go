@@ -48,59 +48,15 @@ const testABIJSON = `[
 ]`
 
 func TestContractType(t *testing.T) {
-	t.Run("Library is 0", func(t *testing.T) {
-		if Library != 0 {
-			t.Errorf("Expected Library to be 0, got %d", Library)
+	t.Run("External is 0", func(t *testing.T) {
+		if External != 0 {
+			t.Errorf("Expected External to be 0, got %d", External)
 		}
 	})
 
-	t.Run("External is 1", func(t *testing.T) {
-		if External != 1 {
-			t.Errorf("Expected External to be 1, got %d", External)
-		}
-	})
-
-	t.Run("StaticExternal is 2", func(t *testing.T) {
-		if StaticExternal != 2 {
-			t.Errorf("Expected StaticExternal to be 2, got %d", StaticExternal)
-		}
-	})
-}
-
-func TestNewLibrary(t *testing.T) {
-	parsed := MustParseABI(testABIJSON)
-	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-
-	t.Run("creates library contract", func(t *testing.T) {
-		lib := NewLibrary(addr, parsed)
-
-		if lib == nil {
-			t.Fatal("Expected library to be non-nil")
-		}
-		if lib.Type() != Library {
-			t.Errorf("Expected Library type, got %v", lib.Type())
-		}
-		if lib.Address() != addr {
-			t.Errorf("Expected address %s, got %s", addr.Hex(), lib.Address().Hex())
-		}
-	})
-
-	t.Run("library uses DELEGATECALL", func(t *testing.T) {
-		lib := NewLibrary(addr, parsed)
-		flags := lib.defaultFlags()
-
-		if flags.CallType() != FlagDelegateCall {
-			t.Errorf("Expected DELEGATECALL, got 0x%02x", flags.CallType())
-		}
-	})
-
-	t.Run("accepts options", func(t *testing.T) {
-		// Library can still accept options even if they don't make sense
-		lib := NewLibrary(addr, parsed, WithStaticCalls())
-
-		// WithStaticCalls changes the type
-		if lib.Type() != StaticExternal {
-			t.Errorf("Expected StaticExternal after option, got %v", lib.Type())
+	t.Run("StaticExternal is 1", func(t *testing.T) {
+		if StaticExternal != 1 {
+			t.Errorf("Expected StaticExternal to be 1, got %d", StaticExternal)
 		}
 	})
 }
@@ -343,15 +299,6 @@ func TestContractMethodNames(t *testing.T) {
 func TestContractDefaultFlags(t *testing.T) {
 	parsed := MustParseABI(testABIJSON)
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-
-	t.Run("Library returns DELEGATECALL", func(t *testing.T) {
-		lib := NewLibrary(addr, parsed)
-		flags := lib.defaultFlags()
-
-		if flags != FlagDelegateCall {
-			t.Errorf("Expected FlagDelegateCall, got 0x%02x", flags)
-		}
-	})
 
 	t.Run("External returns CALL", func(t *testing.T) {
 		contract := NewContract(addr, parsed)

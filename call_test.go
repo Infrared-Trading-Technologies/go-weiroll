@@ -105,18 +105,6 @@ func TestNewCall(t *testing.T) {
 		}
 	})
 
-	t.Run("handles library contracts with DELEGATECALL", func(t *testing.T) {
-		lib := NewLibrary(addr, testABI)
-		call, err := lib.Invoke("add", big.NewInt(1), big.NewInt(2))
-
-		if err != nil {
-			t.Fatalf("Expected no error, got %v", err)
-		}
-		if call.Flags().CallType() != FlagDelegateCall {
-			t.Errorf("Expected DELEGATECALL, got %v", call.Flags().CallType())
-		}
-	})
-
 	t.Run("handles external contracts with CALL", func(t *testing.T) {
 		contract := NewContract(addr, testABI)
 		call, err := contract.Invoke("add", big.NewInt(1), big.NewInt(2))
@@ -190,15 +178,6 @@ func TestCallArgs(t *testing.T) {
 func TestCallFlags(t *testing.T) {
 	testABI := testABI()
 	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
-
-	t.Run("library defaults to DELEGATECALL", func(t *testing.T) {
-		lib := NewLibrary(addr, testABI)
-		call := lib.MustInvoke("add", big.NewInt(1), big.NewInt(2))
-
-		if call.Flags().CallType() != FlagDelegateCall {
-			t.Errorf("Expected DELEGATECALL (0x00), got 0x%02x", call.Flags().CallType())
-		}
-	})
 
 	t.Run("contract defaults to CALL", func(t *testing.T) {
 		contract := NewContract(addr, testABI)
@@ -471,14 +450,6 @@ func TestCallValidate(t *testing.T) {
 		}
 	})
 
-	t.Run("valid DELEGATECALL", func(t *testing.T) {
-		lib := NewLibrary(addr, testABI)
-		call := lib.MustInvoke("add", big.NewInt(1), big.NewInt(2))
-
-		if err := call.validate(); err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-	})
 }
 
 func TestCallComputeFlags(t *testing.T) {

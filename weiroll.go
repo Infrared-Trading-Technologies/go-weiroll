@@ -5,7 +5,7 @@
 // command sequence. This library allows you to build plans that:
 //   - Chain multiple contract calls into a single atomic transaction
 //   - Pass return values between operations without separate transactions
-//   - Support DELEGATECALL (libraries), CALL, STATICCALL, and CALL_WITH_VALUE
+//   - Support CALL, STATICCALL, and CALL_WITH_VALUE
 //
 // # Basic Usage
 //
@@ -15,8 +15,8 @@
 //	mathABI := weiroll.MustParseABI(mathABIJSON)
 //	tokenABI := weiroll.MustParseABI(tokenABIJSON)
 //
-//	// Wrap contracts
-//	mathLib := weiroll.NewLibrary(mathAddr, mathABI)
+//	// Wrap contracts (all calls go through CALL).
+//	mathLib := weiroll.NewContract(mathAddr, mathABI)
 //	token := weiroll.NewContract(tokenAddr, tokenABI)
 //
 //	// Build plan
@@ -38,13 +38,10 @@
 //
 // # Contract Types
 //
-// The library supports two types of contract wrappers:
-//
-//   - Library: Contracts called via DELEGATECALL. These execute in the context
-//     of the weiroll VM and can modify its state. Use NewLibrary() to create.
-//
-//   - External: Contracts called via CALL or STATICCALL. These are regular
-//     external contract calls. Use NewContract() to create.
+// All contracts are wrapped with NewContract(). The default is CALL; pass
+// WithStaticCalls() for STATICCALL. The VM has no DELEGATECALL dispatcher
+// branch — commands emitting FLAG_CT_DELEGATECALL (0x00) revert with
+// "Invalid calltype".
 //
 // # Value Types
 //

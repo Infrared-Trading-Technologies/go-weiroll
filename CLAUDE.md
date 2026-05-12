@@ -31,13 +31,13 @@ The library produces calldata for the on-chain weiroll VM (`integration/contract
 
 **Command encoding** (`encoder.go`). Standard 32-byte form holds ≤6 args; >6 forces extended 64-byte form where Word 1's input bytes (5..10) are unused (`0xff`-padded) and ALL arg slots live in Word 2. Dynamic slot indices carry `0x80`; consumer arg bytes set it where the source is dynamic.
 
-**Two non-obvious VM invariants.** Both produce silent reverts surfaced as `ExecutionFailed(_, _, "Unknown")`:
-1. **DELEGATECALL preserves CALLVALUE.** If `execute()` is called with `msg.value > 0`, every `pure`/`view`/default-mutability target reverts at its dispatcher's nonpayable guard. Use `NewContract` (CALL frame) for pure helpers; reserve `NewLibrary` (DELEGATECALL) for code that must act AS the VM, and mark such targets `external payable` with an `address(this) != _SELF` direct-call guard (see `integration/contracts/MintAdapter.sol`).
-2. **Extended commands put ALL args in Word 2.** Word 1's input slot bytes are unused. Splitting args between the two words silently drops the first six. The encoder pads Word 1's input region with `0xff`.
+**VM invariant worth memorizing.** **Extended commands put ALL args in Word 2.** Word 1's input slot bytes are unused. Splitting args between the two words silently drops the first six. The encoder pads Word 1's input region with `0xff`. Misuse surfaces as `ExecutionFailed(_, _, "Unknown")` or, in the corrupted-flags case, as outright wrong execution.
+
+The VM has no DELEGATECALL dispatcher branch. Commands emitting `FLAG_CT_DELEGATECALL` (0x00) revert with `"Invalid calltype"`. All targets are CALL'd via `NewContract`.
 
 **Static-slot 32-byte invariant.** `CommandBuilder.sol:46` rejects any non-dynamic-flagged slot whose data isn't 32 bytes. A fully-static tuple struct (e.g. Uniswap V3 `exactInputSingle`'s 7-field params) packs to N*32 bytes and trips this. Use `weiroll.Tuple(field1, field2, ...)` to expand into per-field slots; `NewLiteral` rejects oversized static literals with `ErrStaticTupleTooLarge` pointing at `Tuple`. `Tuple` leaves accept static literals and static-typed `*ReturnValue` (the latter enables chaining — e.g. multi-hop V3 swaps where hop-2's `amountIn` slot is hop-1's `*ReturnValue`); `*StateValue`, `*SubplanValue`, and dynamic-typed values are rejected at bind time. The visibility analyzer recurses into `TupleValue.children` so a `*ReturnValue` nested only inside a `Tuple` still registers its consumer; `Planner.Clone` rewires the same `*ReturnValue` leaves when a producer command is cloned.
 
-**Examples are documentation.** `examples/01_simple_return` … `examples/07_advanced_composition` are the canonical patterns, mirrored 1:1 by fork tests `TestForkCase{1,3,4,6,7}_*` for on-chain validation. The full taxonomy of return-value extraction (Cases 1–6) lives in `docs/return-values.md`. Read it before designing a new "extract this from on-chain" pattern — most pitfalls are documented there.
+**Examples are documentation.** `examples/01_simple_return` … `examples/06_self_balance` (plus `examples/basic`, `examples/uniswap-v2-swap`, `examples/weth-wrap-unwrap`) are the canonical patterns, mirrored by fork tests `TestForkCase{1,3,4,6}_*` for on-chain validation. The full taxonomy of return-value extraction lives in `docs/return-values.md`. Read it before designing a new "extract this from on-chain" pattern — most pitfalls are documented there.
 
 ## Versioning & release workflow
 
@@ -67,4 +67,4 @@ Release notes group by impact: **Fixes**, **New API**, **Upgrade notes**. Skip e
 - `README.md` — public-facing intro, contract-type rule, command-encoding layout.
 - `docs/return-values.md` — six-case taxonomy for extracting on-chain values; read before authoring a recipe.
 - `docs/releasing.md` — full release procedure and recovery cheatsheet.
-- `integration/README.md` — fork-test inventory and the three funding patterns (pre-funded VM, inline ETH + pure helpers, inline ETH + delegatecall adapter).
+- `integration/README.md` — fork-test inventory and the two funding patterns (pre-funded VM, inline ETH + pure helpers).
