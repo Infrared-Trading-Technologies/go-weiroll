@@ -1,6 +1,11 @@
 package weiroll
 
-import "math/big"
+import (
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+)
 
 // CommandType specifies the type of command operation.
 type CommandType uint8
@@ -71,6 +76,33 @@ func (p *Planner) Add(call *Call) *ReturnValue {
 		command: cmd,
 		abiType: *call.EffectiveReturnType(),
 	}
+}
+
+// AddRawCall adds a value-bearing call whose calldata is the raw bytes in `data`
+// (or empty for a receive() invocation). The call bypasses ABI binding entirely:
+// no Contract or Method is required, the selector field of the encoded command
+// is zero, and the VM dispatcher delivers `data` verbatim to the target via the
+// FLAG_DATA path. Pass nil or an empty slice to forward ETH to a receive()-only
+// target.
+//
+// The returned *ReturnValue is nil because raw calls declare no ABI return
+// type. To capture returndata, build the call with WithRawCalldata().RawReturn()
+// via a normal Contract/Invoke flow and use Planner.Add.
+func (p *Planner) AddRawCall(target common.Address, value *big.Int, data []byte) *ReturnValue {
+	if value == nil {
+		value = big.NewInt(0)
+	}
+	call := &Call{
+		contract: &Contract{
+			address:      target,
+			contractType: External,
+		},
+		method:      abi.Method{ID: make([]byte, 4)},
+		flags:       FlagCallWithValue | FlagData,
+		value:       new(big.Int).Set(value),
+		rawCalldata: RawBytes(data),
+	}
+	return p.Add(call)
 }
 
 // AddSubplan adds a subplan execution for callbacks like flash loans.
@@ -234,6 +266,9 @@ func (ctx *cloneContext) cloneCall(c *Call) *Call {
 	for i, arg := range c.args {
 		out.args[i] = ctx.rewireValue(arg)
 	}
+	if c.rawCalldata != nil {
+		out.rawCalldata = ctx.rewireValue(c.rawCalldata)
+	}
 	return out
 }
 
@@ -386,7 +421,16 @@ func (p *Planner) Plan(opts ...PlanOption) (*CompiledPlan, error) {
 // arity is preserved (one entry in args == one ABI input parameter),
 // but a single *TupleValue arg expands into multiple state slots, so
 // the returned slot list may be longer than args.
+//
+// FLAG_DATA detour: when the call is configured for raw calldata, the
+// VM dispatcher reads byte 0 of indices as the value slot and byte 1 as
+// the calldata slot, ignoring selector + args. We bypass normal arg
+// resolution and emit exactly [valueSlot, dataSlot].
 func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, error) {
+	if cmd.call.flags&FlagData != 0 {
+		return p.buildRawCalldataSlots(cmd, state)
+	}
+
 	args := cmd.call.Args()
 	slots := make([]uint8, 0, len(args))
 
@@ -411,6 +455,34 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 	return slots, nil
 }
 
+// buildRawCalldataSlots resolves the indices for a FLAG_DATA value call:
+// [valueSlot, calldataSlot]. The value is always materialized as a uint256
+// literal (the VM requires the value slot to be exactly 32 bytes). The
+// calldata source is resolved through the normal state path.
+func (p *Planner) buildRawCalldataSlots(cmd *Command, state *stateManager) ([]uint8, error) {
+	if cmd.call.value == nil {
+		return nil, ErrInvalidCallType
+	}
+	valueLit := Uint256(cmd.call.value)
+	valueSlot, err := state.allocateLiteral(valueLit)
+	if err != nil {
+		return nil, err
+	}
+
+	if cmd.call.rawCalldata == nil {
+		return nil, ErrInvalidCallType
+	}
+	dataSlots, err := state.getSlotsForValue(cmd.call.rawCalldata)
+	if err != nil {
+		return nil, err
+	}
+	if len(dataSlots) != 1 {
+		return nil, ErrInvalidCallType
+	}
+
+	return []uint8{valueSlot, dataSlots[0]}, nil
+}
+
 // analyzeVisibility determines the last command index that uses each
 // command's return value. Returns a map from command to its last
 // usage index.
@@ -426,6 +498,12 @@ func (p *Planner) analyzeVisibility() map[*Command]int {
 	for i, cmd := range p.commands {
 		for _, arg := range cmd.call.Args() {
 			recordVisibility(visibility, arg, i)
+		}
+		// FLAG_DATA: the calldata source may be a *ReturnValue from a prior
+		// command. Record its visibility so the producer's return slot is
+		// allocated and remains live through this command.
+		if cmd.call.rawCalldata != nil {
+			recordVisibility(visibility, cmd.call.rawCalldata, i)
 		}
 	}
 

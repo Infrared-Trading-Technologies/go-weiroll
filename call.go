@@ -19,12 +19,13 @@ var bytesABIType = func() abi.Type {
 // Call represents a pending contract call that can be added to a Planner.
 // Call is immutable - modifier methods return new instances.
 type Call struct {
-	contract  *Contract
-	method    abi.Method
-	args      []Value
-	flags     CallFlags
-	value     *big.Int // ETH value for CALL_WITH_VALUE
-	rawReturn bool     // Wrap return as raw bytes
+	contract    *Contract
+	method      abi.Method
+	args        []Value
+	flags       CallFlags
+	value       *big.Int // ETH value for CALL_WITH_VALUE
+	rawReturn   bool     // Wrap return as raw bytes
+	rawCalldata Value    // Set by WithRawCalldata: raw-bytes state slot used as calldata (FLAG_DATA)
 }
 
 // newCall creates a Call from a contract, method, and arguments.
@@ -163,12 +164,44 @@ func (c *Call) RawReturn() *Call {
 	return clone
 }
 
+// WithRawCalldata routes the call through the FLAG_DATA dispatcher path:
+// the supplied bytes become the entire calldata payload, the call type
+// switches to CALL_WITH_VALUE, and the method's selector and arg
+// resolution are bypassed at execution time. The ETH value defaults to
+// zero if WithValue was not set first. Pass nil or an empty slice to
+// produce a zero-byte call (which invokes the target's receive()) —
+// the only way to forward ETH to a target that has receive() but no
+// payable fallback.
+//
+// Returns a new Call configured for the raw-calldata path.
+func (c *Call) WithRawCalldata(data []byte) *Call {
+	clone := c.clone()
+	clone.flags = (clone.flags &^ FlagCallTypeMask) | FlagCallWithValue | FlagData
+	if clone.value == nil {
+		clone.value = big.NewInt(0)
+	}
+	clone.rawCalldata = RawBytes(data)
+	return clone
+}
+
+// HasRawCalldata reports whether this call uses the FLAG_DATA dispatcher path.
+func (c *Call) HasRawCalldata() bool {
+	return c.flags&FlagData != 0
+}
+
+// RawCalldata returns the Value bound as the calldata source by
+// WithRawCalldata, or nil when FLAG_DATA is not set.
+func (c *Call) RawCalldata() Value {
+	return c.rawCalldata
+}
+
 // clone creates a shallow copy of the Call.
 func (c *Call) clone() *Call {
 	clone := *c
 	// Deep copy the args slice
 	clone.args = make([]Value, len(c.args))
 	copy(clone.args, c.args)
+	// rawCalldata is a Value reference; immutable LiteralValue data is safe to share.
 	return &clone
 }
 

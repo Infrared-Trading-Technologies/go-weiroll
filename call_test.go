@@ -1,6 +1,7 @@
 package weiroll
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
@@ -377,6 +378,92 @@ func TestCallRawReturn(t *testing.T) {
 		// New call has flag
 		if raw.Flags()&FlagTupleReturn == 0 {
 			t.Error("New call should have tuple return flag")
+		}
+	})
+}
+
+func TestCallWithRawCalldata(t *testing.T) {
+	testABI := testABI()
+	addr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	contract := NewContract(addr, testABI)
+
+	t.Run("sets FLAG_DATA, switches to VALUECALL, defaults value to zero", func(t *testing.T) {
+		original := contract.MustInvoke("noReturn", big.NewInt(1))
+		raw := original.WithRawCalldata(nil)
+
+		// Original unchanged.
+		if original.Flags()&FlagData != 0 {
+			t.Error("Original call should not have FLAG_DATA")
+		}
+		if original.HasRawCalldata() {
+			t.Error("Original call should not report HasRawCalldata")
+		}
+		if original.EthValue() != nil {
+			t.Error("Original call should still have nil value")
+		}
+
+		// New call: FLAG_DATA set, call type VALUECALL, value defaulted to 0.
+		if !raw.HasRawCalldata() {
+			t.Error("WithRawCalldata-derived call should report HasRawCalldata")
+		}
+		if raw.Flags()&FlagData == 0 {
+			t.Errorf("Expected FLAG_DATA set, got flags 0x%02x", raw.Flags())
+		}
+		if raw.Flags().CallType() != FlagCallWithValue {
+			t.Errorf("Expected CALL_WITH_VALUE call type, got 0x%02x", raw.Flags().CallType())
+		}
+		if raw.EthValue() == nil || raw.EthValue().Sign() != 0 {
+			t.Errorf("Expected default value=0, got %v", raw.EthValue())
+		}
+		if raw.RawCalldata() == nil {
+			t.Fatal("RawCalldata should be non-nil")
+		}
+	})
+
+	t.Run("preserves preceding WithValue amount", func(t *testing.T) {
+		raw := contract.MustInvoke("noReturn", big.NewInt(1)).
+			WithValue(big.NewInt(7e17)).
+			WithRawCalldata([]byte{0xde, 0xad})
+
+		if raw.EthValue() == nil || raw.EthValue().Cmp(big.NewInt(7e17)) != 0 {
+			t.Errorf("Expected WithValue(7e17) to survive WithRawCalldata, got %v", raw.EthValue())
+		}
+		if raw.Flags()&FlagData == 0 || raw.Flags().CallType() != FlagCallWithValue {
+			t.Errorf("Expected FLAG_DATA + VALUECALL, got flags 0x%02x", raw.Flags())
+		}
+	})
+
+	t.Run("RawCalldata stores bytes verbatim (no ABI length prefix)", func(t *testing.T) {
+		payload := []byte{0xde, 0xad, 0xbe, 0xef}
+		raw := contract.MustInvoke("noReturn", big.NewInt(1)).WithRawCalldata(payload)
+
+		lit, ok := raw.RawCalldata().(*LiteralValue)
+		if !ok {
+			t.Fatalf("Expected RawCalldata to be *LiteralValue, got %T", raw.RawCalldata())
+		}
+		if !bytes.Equal(lit.Data(), payload) {
+			t.Errorf("Literal data should equal payload byte-for-byte: got %x, want %x", lit.Data(), payload)
+		}
+	})
+
+	t.Run("input slice is defensively copied", func(t *testing.T) {
+		payload := []byte{0x01, 0x02}
+		raw := contract.MustInvoke("noReturn", big.NewInt(1)).WithRawCalldata(payload)
+
+		// Mutate the caller's slice.
+		payload[0] = 0xff
+
+		lit := raw.RawCalldata().(*LiteralValue)
+		if lit.Data()[0] == 0xff {
+			t.Error("Mutating the source slice bled into the Call's rawCalldata")
+		}
+	})
+
+	t.Run("nil payload yields empty state slot", func(t *testing.T) {
+		raw := contract.MustInvoke("noReturn", big.NewInt(1)).WithRawCalldata(nil)
+		lit := raw.RawCalldata().(*LiteralValue)
+		if len(lit.Data()) != 0 {
+			t.Errorf("Expected zero-byte data for nil payload, got %d bytes", len(lit.Data()))
 		}
 	})
 }

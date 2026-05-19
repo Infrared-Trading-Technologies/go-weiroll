@@ -501,6 +501,25 @@ func Bytes(v []byte) *LiteralValue {
 	return MustLiteralFromType("bytes", v)
 }
 
+// RawBytes creates a bytes literal whose state-slot contents are the raw bytes
+// verbatim (no ABI length prefix, no 32-byte padding). Use this only as the
+// argument to Call.WithRawCalldata or Planner.AddRawCall — the FLAG_DATA
+// dispatcher path reads the slot as a raw calldata payload, so length-prefixed
+// or padded encodings would corrupt what the target receives. A nil or
+// zero-length slice yields a zero-byte state slot, which produces a zero-byte
+// call (receive()).
+func RawBytes(v []byte) *LiteralValue {
+	// Always materialize a non-nil slice. The state manager treats a nil
+	// data field as "unallocated return slot" and zero-fills it to 32 bytes
+	// in finalize(); an empty RawBytes literal must survive that as 0 bytes.
+	data := make([]byte, len(v))
+	copy(data, v)
+	return &LiteralValue{
+		abiType: bytesABIType,
+		data:    data,
+	}
+}
+
 // isValue checks if a value implements the Value interface.
 func isValue(v any) bool {
 	_, ok := v.(Value)

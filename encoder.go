@@ -50,6 +50,13 @@ const (
 	// FlagCallTypeMask masks the call type bits.
 	FlagCallTypeMask CallFlags = 0x03
 
+	// FlagData, combined with FlagCallWithValue, makes the VM dispatcher take
+	// the call's calldata verbatim from a state slot instead of building it
+	// from selector + ABI-encoded args. Empty bytes in the slot -> zero-byte
+	// calldata (invokes the target's receive()). The selector field of the
+	// command is ignored on this path. Bit 5.
+	FlagData CallFlags = 0x20
+
 	// FlagExtendedCommand indicates an extended command (>6 args). Bit 6.
 	FlagExtendedCommand CallFlags = 0x40
 

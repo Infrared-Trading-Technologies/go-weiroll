@@ -76,6 +76,8 @@ func TestCommandEncoderEncodeAllFlags(t *testing.T) {
 		{"Call", FlagCall},
 		{"StaticCall", FlagStaticCall},
 		{"CallWithValue", FlagCallWithValue},
+		{"Data", FlagData},
+		{"CallWithValue|Data", FlagCallWithValue | FlagData},
 		{"ExtendedCommand", FlagExtendedCommand},
 		{"TupleReturn", FlagTupleReturn},
 		{"Combined flags", FlagCall | FlagExtendedCommand | FlagTupleReturn},
@@ -544,5 +546,45 @@ func TestEncodeCommandRoundtrip(t *testing.T) {
 				t.Errorf("Address mismatch: expected %s, got %s", tc.address.Hex(), address.Hex())
 			}
 		})
+	}
+}
+
+// TestCommandEncoderFlagData asserts the wire-level shape of a FLAG_DATA
+// command: flag byte 0x23 (VALUECALL | FLAG_DATA), value slot at indices[0],
+// calldata slot at indices[1], remaining slots padded.
+func TestCommandEncoderFlagData(t *testing.T) {
+	encoder := NewCommandEncoder()
+	selector := [4]byte{} // Ignored on the FLAG_DATA path; encoded as zero.
+	address := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// Planner emits exactly two slot bytes for a FLAG_DATA command.
+	argSlots := []uint8{0x05, 0x07}
+	cmd := encoder.Encode(selector, FlagCallWithValue|FlagData, argSlots, NoReturnSlot, address)
+
+	if cmd[4] != 0x23 {
+		t.Errorf("Expected flag byte 0x23 (VALUECALL|DATA), got 0x%02x", cmd[4])
+	}
+	if cmd[5] != 0x05 {
+		t.Errorf("Expected indices[0]=0x05 (value slot), got 0x%02x", cmd[5])
+	}
+	if cmd[6] != 0x07 {
+		t.Errorf("Expected indices[1]=0x07 (calldata slot), got 0x%02x", cmd[6])
+	}
+	for i := 7; i <= 10; i++ {
+		if cmd[i] != UnusedSlot {
+			t.Errorf("Expected indices[%d]=0xff (padding), got 0x%02x", i-5, cmd[i])
+		}
+	}
+
+	// Round-trip: decode recovers the same flags and slots.
+	_, flags, decodedSlots, _, _, err := DecodeCommand(cmd)
+	if err != nil {
+		t.Fatalf("DecodeCommand: %v", err)
+	}
+	if flags != FlagCallWithValue|FlagData {
+		t.Errorf("Round-trip flags: got 0x%02x, want 0x23", flags)
+	}
+	if !bytes.Equal(decodedSlots, argSlots) {
+		t.Errorf("Round-trip argSlots: got %v, want %v", decodedSlots, argSlots)
 	}
 }

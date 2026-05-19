@@ -996,9 +996,9 @@ func TestPlannerClone_ConcurrentPlan(t *testing.T) {
 	clone := orig.Clone()
 
 	var (
-		wg                    sync.WaitGroup
-		origPlan, clonePlan   *CompiledPlan
-		origErr, cloneErr     error
+		wg                  sync.WaitGroup
+		origPlan, clonePlan *CompiledPlan
+		origErr, cloneErr   error
 	)
 
 	wg.Add(2)
@@ -1109,7 +1109,7 @@ const exactInputSingleABI = `[{
 
 func TestPlanWithStaticTupleArg(t *testing.T) {
 	routerAddr := common.HexToAddress("0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45")
-	tokenIn := common.HexToAddress("0x514910771AF9Ca656af840dff83E8264EcF986CA") // LINK
+	tokenIn := common.HexToAddress("0x514910771AF9Ca656af840dff83E8264EcF986CA")  // LINK
 	tokenOut := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2") // WETH
 	recipient := common.HexToAddress("0xEEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0")
 
@@ -1302,5 +1302,155 @@ func TestPlanRejectsStructLiteralForStaticTuple(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "weiroll.Tuple") {
 		t.Errorf("error message should reference weiroll.Tuple; got: %v", err)
+	}
+}
+
+// TestPlannerAddRawCallEmptyCalldata covers the descry.helpers.SendNativeEth
+// shape: forward ETH to a receive()-only target via FLAG_DATA with empty bytes.
+// The compiled plan should produce one 32-byte command with the right shape and
+// a state array whose calldata slot is zero-length bytes.
+func TestPlannerAddRawCallEmptyCalldata(t *testing.T) {
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000001")
+	value := big.NewInt(1e17) // 0.1 ETH
+
+	p := New()
+	rv := p.AddRawCall(target, value, nil)
+	if rv != nil {
+		t.Errorf("AddRawCall should return nil *ReturnValue, got %v", rv)
+	}
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+
+	if len(compiled.Commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(compiled.Commands))
+	}
+	cmd := compiled.Commands[0]
+	if len(cmd) != CommandSize {
+		t.Fatalf("Expected 32-byte command, got %d", len(cmd))
+	}
+
+	// Selector zero on the FLAG_DATA path.
+	for i := 0; i < 4; i++ {
+		if cmd[i] != 0 {
+			t.Errorf("Selector byte %d should be zero, got 0x%02x", i, cmd[i])
+		}
+	}
+	if cmd[4] != 0x23 {
+		t.Errorf("Expected flag byte 0x23, got 0x%02x", cmd[4])
+	}
+
+	valueSlot := cmd[5]
+	dataSlot := cmd[6]
+
+	// dataSlot carries the DynamicSlotFlag because the calldata literal is
+	// dynamic bytes. The VM strips the high bit via IDX_VALUE_MASK at
+	// execution time; here we just confirm the masked index resolves to a
+	// real state slot.
+	if dataSlot&DynamicSlotFlag == 0 {
+		t.Errorf("Expected dynamic flag on data slot byte 0x%02x", dataSlot)
+	}
+	maskedDataSlot := dataSlot & ^uint8(DynamicSlotFlag)
+
+	for i := 7; i <= 10; i++ {
+		if cmd[i] != UnusedSlot {
+			t.Errorf("Expected padding at indices[%d]=0xff, got 0x%02x", i-5, cmd[i])
+		}
+	}
+	if cmd[11] != NoReturnSlot {
+		t.Errorf("Expected return slot 0xff, got 0x%02x", cmd[11])
+	}
+	if common.BytesToAddress(cmd[12:32]) != target {
+		t.Errorf("Address mismatch: %s vs %s", common.BytesToAddress(cmd[12:32]).Hex(), target.Hex())
+	}
+
+	// State: valueSlot contains 32-byte big-endian encoding of 0.1 ETH;
+	// dataSlot is exactly zero bytes (so the on-chain call carries empty
+	// calldata and invokes receive()).
+	if int(valueSlot) >= len(compiled.State) || int(maskedDataSlot) >= len(compiled.State) {
+		t.Fatalf("State too small: have %d, want valueSlot=%d, dataSlot=%d",
+			len(compiled.State), valueSlot, maskedDataSlot)
+	}
+	if len(compiled.State[valueSlot]) != 32 {
+		t.Errorf("Value slot must be 32 bytes, got %d", len(compiled.State[valueSlot]))
+	}
+	if len(compiled.State[maskedDataSlot]) != 0 {
+		t.Errorf("Data slot must be zero bytes for receive() invocation, got %d bytes (%x)",
+			len(compiled.State[maskedDataSlot]), compiled.State[maskedDataSlot])
+	}
+}
+
+// TestPlannerAddRawCallArbitraryCalldata confirms the encoder forwards an
+// arbitrary byte payload verbatim into the state slot — no length prefix, no
+// 32-byte padding.
+func TestPlannerAddRawCallArbitraryCalldata(t *testing.T) {
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000002")
+	payload := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe}
+
+	p := New()
+	p.AddRawCall(target, big.NewInt(0), payload)
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+
+	dataSlot := compiled.Commands[0][6] & ^uint8(DynamicSlotFlag)
+	if !bytes.Equal(compiled.State[dataSlot], payload) {
+		t.Errorf("Data slot should equal payload byte-for-byte: got %x, want %x",
+			compiled.State[dataSlot], payload)
+	}
+}
+
+// TestPlannerWithRawCalldataViaContract exercises the contract-bound path:
+// build a Call via Contract.Invoke and switch it to FLAG_DATA via
+// WithRawCalldata. The resulting plan should encode identically to the
+// AddRawCall shortcut (same flag byte, same indices layout).
+func TestPlannerWithRawCalldataViaContract(t *testing.T) {
+	abi := plannerTestABI()
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000003")
+	contract := NewContract(target, abi)
+	payload := []byte{0x12, 0x34, 0x56}
+
+	p := New()
+	// The ABI method is irrelevant when FLAG_DATA is set — the VM ignores
+	// the selector and arg slots. We use noReturn(uint256) only as a syntactic
+	// hook to obtain a Call we can mutate with WithRawCalldata.
+	p.Add(contract.MustInvoke("noReturn", big.NewInt(99)).WithValue(big.NewInt(42)).WithRawCalldata(payload))
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+
+	cmd := compiled.Commands[0]
+	if cmd[4] != 0x23 {
+		t.Errorf("Expected flag byte 0x23, got 0x%02x", cmd[4])
+	}
+	// Method's actual selector should be overwritten by WithRawCalldata's
+	// zero-selector behavior at the *dispatch* level; on the wire we still
+	// emit the contract's selector (the VM ignores it). Just sanity check
+	// that the flag bit is correct.
+
+	valueSlot := cmd[5]
+	dataSlot := cmd[6] & ^uint8(DynamicSlotFlag)
+
+	if len(compiled.State[valueSlot]) != 32 {
+		t.Errorf("Value slot must be 32 bytes, got %d", len(compiled.State[valueSlot]))
+	}
+	if !bytes.Equal(compiled.State[dataSlot], payload) {
+		t.Errorf("Data slot should equal payload: got %x, want %x", compiled.State[dataSlot], payload)
+	}
+}
+
+// TestPlannerRawCallReturnValueIsNil documents the API contract: raw calls
+// have no ABI-declared return type, so Add/AddRawCall returns nil.
+func TestPlannerRawCallReturnValueIsNil(t *testing.T) {
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000004")
+	p := New()
+	if rv := p.AddRawCall(target, big.NewInt(0), nil); rv != nil {
+		t.Errorf("AddRawCall should return nil, got %v", rv)
 	}
 }
