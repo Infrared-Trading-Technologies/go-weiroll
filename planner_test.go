@@ -1404,6 +1404,135 @@ func TestPlannerAddRawCallArbitraryCalldata(t *testing.T) {
 	}
 }
 
+// TestPlannerAddRawCallV covers the ref-piped value path: a prior command's
+// uint256 return is consumed as the VALUECALL value at runtime via FLAG_DATA.
+// This is the surface descry.helpers.SendNativeEth uses to forward "whatever
+// ETH is at the executor right now" — e.g., piped from helpers.EthBalance.
+func TestPlannerAddRawCallV(t *testing.T) {
+	testABI := plannerTestABI()
+	producer := common.HexToAddress("0xCAFE000000000000000000000000000000000010")
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000011")
+
+	p := New()
+	// Producer: add(1, 2) -> uint256. Its return slot is what we want to
+	// thread into the VALUECALL value position.
+	rv := p.Add(NewContract(producer, testABI).MustInvoke("add", big.NewInt(1), big.NewInt(2)))
+	if rv == nil {
+		t.Fatal("producer Add must return a non-nil *ReturnValue")
+	}
+
+	// Consumer: AddRawCallV with empty calldata. Receives ETH equal to whatever
+	// the producer returned.
+	out := p.AddRawCallV(target, rv, nil)
+	if out != nil {
+		t.Errorf("AddRawCallV should return nil *ReturnValue, got %v", out)
+	}
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if len(compiled.Commands) != 2 {
+		t.Fatalf("Expected 2 commands, got %d", len(compiled.Commands))
+	}
+
+	// Producer command: producer.add(1, 2) -> some return slot.
+	producerCmd := compiled.Commands[0]
+	producerReturnSlot := producerCmd[11]
+	if producerReturnSlot == NoReturnSlot {
+		t.Fatal("Producer must have a return slot assigned (consumer's valueRef keeps it live)")
+	}
+
+	// Consumer command: FLAG_DATA value-call. indices[0] = producer return slot,
+	// indices[1] = empty-bytes calldata slot.
+	consumerCmd := compiled.Commands[1]
+	if consumerCmd[4] != 0x23 {
+		t.Errorf("Expected flag byte 0x23 (VALUECALL|FLAG_DATA), got 0x%02x", consumerCmd[4])
+	}
+	if consumerCmd[5] != producerReturnSlot {
+		t.Errorf("indices[0] should equal producer's return slot: got 0x%02x, want 0x%02x",
+			consumerCmd[5], producerReturnSlot)
+	}
+	dataSlot := consumerCmd[6] & ^uint8(DynamicSlotFlag)
+	if int(dataSlot) >= len(compiled.State) {
+		t.Fatalf("Data slot %d out of bounds (state size %d)", dataSlot, len(compiled.State))
+	}
+	if len(compiled.State[dataSlot]) != 0 {
+		t.Errorf("Data slot must be zero bytes for receive() invocation, got %d bytes",
+			len(compiled.State[dataSlot]))
+	}
+
+	// Selector zero, padding 0xff, no return slot, target address.
+	for i := 0; i < 4; i++ {
+		if consumerCmd[i] != 0 {
+			t.Errorf("Selector byte %d should be zero, got 0x%02x", i, consumerCmd[i])
+		}
+	}
+	for i := 7; i <= 10; i++ {
+		if consumerCmd[i] != UnusedSlot {
+			t.Errorf("Expected padding at byte %d=0xff, got 0x%02x", i, consumerCmd[i])
+		}
+	}
+	if consumerCmd[11] != NoReturnSlot {
+		t.Errorf("Expected return slot 0xff, got 0x%02x", consumerCmd[11])
+	}
+	if common.BytesToAddress(consumerCmd[12:32]) != target {
+		t.Errorf("Address mismatch: %s vs %s",
+			common.BytesToAddress(consumerCmd[12:32]).Hex(), target.Hex())
+	}
+}
+
+// TestPlannerAddRawCallV_DynamicValueRejected ensures the encoder refuses a
+// dynamic-typed *ReturnValue as the value source. The VM requires the value
+// slot to be exactly 32 bytes (VM.sol VALUECALL: `require(v.length == 32)`),
+// so dynamic return types (string, bytes, dynamic arrays) cannot be threaded
+// through this seam.
+func TestPlannerAddRawCallV_DynamicValueRejected(t *testing.T) {
+	testABI := plannerTestABI()
+	producer := common.HexToAddress("0xCAFE000000000000000000000000000000000020")
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000021")
+
+	p := New()
+	// getString() returns string -- dynamic ABI type.
+	rv := p.Add(NewContract(producer, testABI).MustInvoke("getString"))
+	if !rv.IsDynamic() {
+		t.Fatal("test setup error: getString() return should be dynamic")
+	}
+
+	p.AddRawCallV(target, rv, nil)
+
+	_, err := p.Plan()
+	if err == nil {
+		t.Fatal("Plan must reject a dynamic-typed valueRef")
+	}
+}
+
+// TestPlannerAddRawCallV_VisibilityKeepsProducerLive proves that consuming a
+// *ReturnValue only via the valueRef seam (no other consumers) is sufficient
+// to keep the producer's return slot allocated and live through the
+// consumer command. Without analyzeVisibility tracking valueRef, the producer
+// command would emit no return slot and the consumer would resolve to a
+// missing slot at Plan time.
+func TestPlannerAddRawCallV_VisibilityKeepsProducerLive(t *testing.T) {
+	testABI := plannerTestABI()
+	producer := common.HexToAddress("0xCAFE000000000000000000000000000000000030")
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000031")
+
+	p := New()
+	rv := p.Add(NewContract(producer, testABI).MustInvoke("add", big.NewInt(7), big.NewInt(8)))
+	// valueRef is the ONLY consumer of rv. If visibility were not tracked,
+	// allocateReturn would never run for the producer and Plan() would fail.
+	p.AddRawCallV(target, rv, nil)
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if compiled.Commands[0][11] == NoReturnSlot {
+		t.Fatal("Producer return slot must be allocated when its only consumer is valueRef")
+	}
+}
+
 // TestPlannerWithRawCalldataViaContract exercises the contract-bound path:
 // build a Call via Contract.Invoke and switch it to FLAG_DATA via
 // WithRawCalldata. The resulting plan should encode identically to the

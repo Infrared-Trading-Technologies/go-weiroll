@@ -105,6 +105,34 @@ func (p *Planner) AddRawCall(target common.Address, value *big.Int, data []byte)
 	return p.Add(call)
 }
 
+// AddRawCallV adds a value-bearing call whose ETH value is sourced at runtime
+// from a prior command's return slot, and whose calldata is the raw bytes in
+// `data` (or empty for a receive() invocation). This is the ref-piped sibling
+// of AddRawCall: use it when the amount to forward isn't known at plan-build
+// time and must be computed by an earlier command (e.g., a balance read).
+//
+// `valueRef` must be non-nil and must reference a static (32-byte) return slot.
+// Dynamic-typed return values (bytes, string, dynamic arrays) are rejected at
+// Plan() time because the VM requires the value slot to be exactly 32 bytes
+// (see VM.sol's VALUECALL branch).
+//
+// Pass nil or an empty slice for `data` to forward ETH to a receive()-only
+// target. The returned *ReturnValue is nil — raw calls declare no ABI return
+// type.
+func (p *Planner) AddRawCallV(target common.Address, valueRef *ReturnValue, data []byte) *ReturnValue {
+	call := &Call{
+		contract: &Contract{
+			address:      target,
+			contractType: External,
+		},
+		method:      abi.Method{ID: make([]byte, 4)},
+		flags:       FlagCallWithValue | FlagData,
+		valueRef:    valueRef,
+		rawCalldata: RawBytes(data),
+	}
+	return p.Add(call)
+}
+
 // AddSubplan adds a subplan execution for callbacks like flash loans.
 // The call must accept a bytes32[] argument for the subplan commands
 // and may accept a bytes[] argument for the state.
@@ -456,17 +484,37 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 }
 
 // buildRawCalldataSlots resolves the indices for a FLAG_DATA value call:
-// [valueSlot, calldataSlot]. The value is always materialized as a uint256
-// literal (the VM requires the value slot to be exactly 32 bytes). The
+// [valueSlot, calldataSlot]. The value is sourced either from a literal
+// (cmd.call.value, allocated as a uint256) or from a prior command's return
+// slot (cmd.call.valueRef). In both cases the VM requires the value slot to
+// be exactly 32 bytes, so dynamic-typed return values are rejected here. The
 // calldata source is resolved through the normal state path.
 func (p *Planner) buildRawCalldataSlots(cmd *Command, state *stateManager) ([]uint8, error) {
-	if cmd.call.value == nil {
+	var valueSlot uint8
+	switch {
+	case cmd.call.valueRef != nil:
+		if cmd.call.valueRef.IsDynamic() {
+			return nil, &EncodingError{Value: cmd.call.valueRef, Err: ErrInvalidCallType}
+		}
+		slots, err := state.getSlotsForValue(cmd.call.valueRef)
+		if err != nil {
+			return nil, err
+		}
+		if len(slots) != 1 {
+			return nil, ErrInvalidCallType
+		}
+		// Static type: getSlotsForValue did not set DynamicSlotFlag. The byte is
+		// safe to use as the value slot index directly.
+		valueSlot = slots[0]
+	case cmd.call.value != nil:
+		valueLit := Uint256(cmd.call.value)
+		slot, err := state.allocateLiteral(valueLit)
+		if err != nil {
+			return nil, err
+		}
+		valueSlot = slot
+	default:
 		return nil, ErrInvalidCallType
-	}
-	valueLit := Uint256(cmd.call.value)
-	valueSlot, err := state.allocateLiteral(valueLit)
-	if err != nil {
-		return nil, err
 	}
 
 	if cmd.call.rawCalldata == nil {
@@ -504,6 +552,11 @@ func (p *Planner) analyzeVisibility() map[*Command]int {
 		// allocated and remains live through this command.
 		if cmd.call.rawCalldata != nil {
 			recordVisibility(visibility, cmd.call.rawCalldata, i)
+		}
+		// AddRawCallV: the value source is a *ReturnValue from a prior
+		// command. Same visibility requirement as rawCalldata.
+		if cmd.call.valueRef != nil {
+			recordVisibility(visibility, cmd.call.valueRef, i)
 		}
 	}
 

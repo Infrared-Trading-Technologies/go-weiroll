@@ -23,9 +23,10 @@ type Call struct {
 	method      abi.Method
 	args        []Value
 	flags       CallFlags
-	value       *big.Int // ETH value for CALL_WITH_VALUE
-	rawReturn   bool     // Wrap return as raw bytes
-	rawCalldata Value    // Set by WithRawCalldata: raw-bytes state slot used as calldata (FLAG_DATA)
+	value       *big.Int      // ETH value for CALL_WITH_VALUE; mutually exclusive with valueRef
+	valueRef    *ReturnValue  // ETH value sourced from a prior command's return slot (FLAG_DATA path); mutually exclusive with value
+	rawReturn   bool          // Wrap return as raw bytes
+	rawCalldata Value         // Set by WithRawCalldata: raw-bytes state slot used as calldata (FLAG_DATA)
 }
 
 // newCall creates a Call from a contract, method, and arguments.
