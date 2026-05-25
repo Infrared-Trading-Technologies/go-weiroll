@@ -1583,3 +1583,73 @@ func TestPlannerRawCallReturnValueIsNil(t *testing.T) {
 		t.Errorf("AddRawCall should return nil, got %v", rv)
 	}
 }
+
+// TestPlannerCallWithValueSlotLayout pins the indices layout the on-chain
+// VM expects for FLAG_CT_VALUECALL without FLAG_DATA. VM.sol's branch is:
+//
+//	bytes memory v = state[uint8(bytes1(indices))];          // byte 0 → value slot
+//	... = state.buildInputs(selector, indices << 8 | END);   // bytes 1..N → arg slots
+//
+// so the value slot MUST come first, followed by the ABI arg slots.
+// Appending the value slot last (as a prior implementation did) silently
+// works only when len(args) == 0 (e.g. weth.Deposit) because the "first"
+// and "only" slots collapse to the same byte; with one or more ABI args
+// the first slot ends up being interpreted as the value and the actual
+// value slot is mis-read as an arg.
+func TestPlannerCallWithValueSlotLayout(t *testing.T) {
+	abi := plannerTestABI()
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000005")
+	contract := NewContract(target, abi)
+
+	a := big.NewInt(11)
+	b := big.NewInt(22)
+	value := big.NewInt(42)
+
+	p := New()
+	p.Add(contract.MustInvoke("add", a, b).WithValue(value))
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if len(compiled.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(compiled.Commands))
+	}
+
+	cmd := compiled.Commands[0]
+
+	if got := CallFlags(cmd[4]).CallType(); got != FlagCallWithValue {
+		t.Fatalf("expected call type 0x%02x (CALL_WITH_VALUE), got 0x%02x", FlagCallWithValue, got)
+	}
+
+	// VM convention: indices[0] (= cmd[5]) is the value slot, indices[1..N]
+	// (= cmd[6..5+N]) are the ABI arg slots, and the remaining bytes up to
+	// indices[5] (= cmd[10]) are padded with UnusedSlot (0xff).
+	valueSlot := cmd[5]
+	argASlot := cmd[6]
+	argBSlot := cmd[7]
+
+	want := make([]byte, 32)
+	value.FillBytes(want)
+	if got := compiled.State[valueSlot]; !bytes.Equal(got, want) {
+		t.Errorf("indices[0] should point at the value slot (%s):\n  state[%d] = %x\n  want      = %x",
+			value, valueSlot, got, want)
+	}
+	wantA := make([]byte, 32)
+	a.FillBytes(wantA)
+	if got := compiled.State[argASlot]; !bytes.Equal(got, wantA) {
+		t.Errorf("indices[1] should point at the first ABI arg (%s):\n  state[%d] = %x\n  want      = %x",
+			a, argASlot, got, wantA)
+	}
+	wantB := make([]byte, 32)
+	b.FillBytes(wantB)
+	if got := compiled.State[argBSlot]; !bytes.Equal(got, wantB) {
+		t.Errorf("indices[2] should point at the second ABI arg (%s):\n  state[%d] = %x\n  want      = %x",
+			b, argBSlot, got, wantB)
+	}
+	for i := 8; i <= 10; i++ {
+		if cmd[i] != UnusedSlot {
+			t.Errorf("indices[%d] should be UnusedSlot (0xff), got 0x%02x", i-5, cmd[i])
+		}
+	}
+}

@@ -460,17 +460,17 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 	}
 
 	args := cmd.call.Args()
-	slots := make([]uint8, 0, len(args))
+	slots := make([]uint8, 0, len(args)+1)
 
-	for _, arg := range args {
-		argSlots, err := state.getSlotsForValue(arg)
-		if err != nil {
-			return nil, err
-		}
-		slots = append(slots, argSlots...)
-	}
-
-	// If call has value, add it as an extra argument
+	// For FLAG_CT_VALUECALL without FLAG_DATA, the on-chain VM reads the
+	// value slot from byte 0 of indices and the ABI arg slots from bytes
+	// 1..N (see VM.sol's VALUECALL branch:
+	//   bytes memory v = state[uint8(bytes1(indices))];
+	//   ... state.buildInputs(selector, indices << 8 | END_OF_ARGS);
+	// ). The value slot MUST come first. Appending it last only happens
+	// to work when len(args) == 0 — the "first" and "only" slot collapse
+	// — and silently corrupts any call that mixes a value forward with
+	// one or more ABI args.
 	if cmd.call.value != nil && cmd.call.value.Sign() > 0 {
 		valueLit := Uint256(cmd.call.value)
 		slot, err := state.allocateLiteral(valueLit)
@@ -478,6 +478,14 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 			return nil, err
 		}
 		slots = append(slots, slot)
+	}
+
+	for _, arg := range args {
+		argSlots, err := state.getSlotsForValue(arg)
+		if err != nil {
+			return nil, err
+		}
+		slots = append(slots, argSlots...)
 	}
 
 	return slots, nil
