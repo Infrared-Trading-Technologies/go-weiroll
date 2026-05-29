@@ -1653,3 +1653,57 @@ func TestPlannerCallWithValueSlotLayout(t *testing.T) {
 		}
 	}
 }
+
+// TestPlannerCallWithValueRefSlotLayout proves WithValueRef prepends a runtime
+// value slot ahead of the ABI args on the normal (non-FLAG_DATA) dispatch path,
+// and that the same *ReturnValue used as both the forwarded value and an ABI
+// arg resolves to one shared state slot (indices[0] == indices[1]). This is the
+// exact shape a native-ETH-input swap needs: the prior command's realized
+// amount is both the call value and the amountIn parameter.
+func TestPlannerCallWithValueRefSlotLayout(t *testing.T) {
+	abi := plannerTestABI()
+	target := common.HexToAddress("0xCAFE000000000000000000000000000000000006")
+	contract := NewContract(target, abi)
+
+	p := New()
+	// Producer: add(3, 4) -> uint256 return slot.
+	out := p.Add(contract.MustInvoke("add", big.NewInt(3), big.NewInt(4)))
+	// Consumer: add(out, 9) with the SAME return slot forwarded as the value.
+	b2 := big.NewInt(9)
+	p.Add(contract.MustInvoke("add", out, b2).WithValueRef(out))
+
+	compiled, err := p.Plan()
+	if err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if len(compiled.Commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(compiled.Commands))
+	}
+
+	cmd := compiled.Commands[1]
+	if got := CallFlags(cmd[4]).CallType(); got != FlagCallWithValue {
+		t.Fatalf("expected call type 0x%02x (CALL_WITH_VALUE), got 0x%02x", FlagCallWithValue, got)
+	}
+
+	valueSlot := cmd[5] // indices[0]
+	arg0Slot := cmd[6]  // indices[1]
+	arg1Slot := cmd[7]  // indices[2]
+
+	// valueRef and the first ABI arg are the SAME *ReturnValue, so they must
+	// resolve to one shared slot index.
+	if valueSlot != arg0Slot {
+		t.Errorf("value slot (indices[0]=%d) must equal the shared return-ref arg slot (indices[1]=%d)",
+			valueSlot, arg0Slot)
+	}
+	wantB := make([]byte, 32)
+	b2.FillBytes(wantB)
+	if got := compiled.State[arg1Slot]; !bytes.Equal(got, wantB) {
+		t.Errorf("indices[2] should point at the second ABI arg (%s):\n  state[%d] = %x\n  want      = %x",
+			b2, arg1Slot, got, wantB)
+	}
+	for i := 8; i <= 10; i++ {
+		if cmd[i] != UnusedSlot {
+			t.Errorf("indices[%d] should be UnusedSlot (0xff), got 0x%02x", i-5, cmd[i])
+		}
+	}
+}

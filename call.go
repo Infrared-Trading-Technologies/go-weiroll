@@ -23,10 +23,10 @@ type Call struct {
 	method      abi.Method
 	args        []Value
 	flags       CallFlags
-	value       *big.Int      // ETH value for CALL_WITH_VALUE; mutually exclusive with valueRef
-	valueRef    *ReturnValue  // ETH value sourced from a prior command's return slot (FLAG_DATA path); mutually exclusive with value
-	rawReturn   bool          // Wrap return as raw bytes
-	rawCalldata Value         // Set by WithRawCalldata: raw-bytes state slot used as calldata (FLAG_DATA)
+	value       *big.Int     // ETH value for CALL_WITH_VALUE; mutually exclusive with valueRef
+	valueRef    *ReturnValue // ETH value sourced from a prior command's return slot (FLAG_DATA path); mutually exclusive with value
+	rawReturn   bool         // Wrap return as raw bytes
+	rawCalldata Value        // Set by WithRawCalldata: raw-bytes state slot used as calldata (FLAG_DATA)
 }
 
 // newCall creates a Call from a contract, method, and arguments.
@@ -134,6 +134,31 @@ func (c *Call) Selector() [4]byte {
 func (c *Call) WithValue(amount *big.Int) *Call {
 	clone := c.clone()
 	clone.value = new(big.Int).Set(amount)
+	clone.valueRef = nil
+	clone.flags = (clone.flags &^ FlagCallTypeMask) | FlagCallWithValue
+	return clone
+}
+
+// WithValueRef attaches an ETH value sourced at runtime from a prior command's
+// return slot, for the normal (selector + ABI args) dispatch path. Use it when
+// the amount of ETH to forward isn't known at plan-build time and must be
+// computed by an earlier command (e.g. a swap's realized output already
+// unwrapped to native ETH on the executor), and the call still carries ABI
+// arguments — the typed sibling of AddRawCallV, which only forwards raw
+// calldata.
+//
+// valueRef must reference a static (32-byte) return slot; dynamic-typed returns
+// (bytes, string, dynamic arrays) are rejected at Plan() time because the VM
+// requires the value slot to be exactly 32 bytes. The same *ReturnValue may
+// also appear among the call's args (e.g. an amountIn parameter that equals the
+// forwarded value) — the VM reads the slot for both the value and the arg.
+//
+// Converts the call to CALL_WITH_VALUE and clears any literal value previously
+// set with WithValue (the two are mutually exclusive). Returns a new Call.
+func (c *Call) WithValueRef(valueRef *ReturnValue) *Call {
+	clone := c.clone()
+	clone.value = nil
+	clone.valueRef = valueRef
 	clone.flags = (clone.flags &^ FlagCallTypeMask) | FlagCallWithValue
 	return clone
 }
@@ -215,6 +240,17 @@ func (c *Call) validate() error {
 	// not FlagCallWithValue (0x03).
 	if c.value != nil && c.value.Sign() > 0 && callType != FlagCallWithValue {
 		return ErrInvalidCallType
+	}
+
+	// A runtime value-ref is likewise only meaningful for CALL_WITH_VALUE, and
+	// is mutually exclusive with a literal value.
+	if c.valueRef != nil {
+		if callType != FlagCallWithValue {
+			return ErrInvalidCallType
+		}
+		if c.value != nil {
+			return ErrInvalidCallType
+		}
 	}
 
 	return nil

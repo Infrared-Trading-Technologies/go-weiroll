@@ -471,7 +471,26 @@ func (p *Planner) buildArgSlots(cmd *Command, state *stateManager) ([]uint8, err
 	// to work when len(args) == 0 — the "first" and "only" slot collapse
 	// — and silently corrupts any call that mixes a value forward with
 	// one or more ABI args.
-	if cmd.call.value != nil && cmd.call.value.Sign() > 0 {
+	//
+	// The value may be a build-time literal (cmd.call.value, set by WithValue)
+	// or sourced at runtime from a prior command's return slot (cmd.call.valueRef,
+	// set by WithValueRef). The VM reads 32 bytes from the value slot either way;
+	// a runtime value-ref must be static (32-byte), so a dynamic return is
+	// rejected here.
+	switch {
+	case cmd.call.valueRef != nil:
+		if cmd.call.valueRef.IsDynamic() {
+			return nil, &EncodingError{Value: cmd.call.valueRef, Err: ErrInvalidCallType}
+		}
+		valueSlots, err := state.getSlotsForValue(cmd.call.valueRef)
+		if err != nil {
+			return nil, err
+		}
+		if len(valueSlots) != 1 {
+			return nil, ErrInvalidCallType
+		}
+		slots = append(slots, valueSlots[0])
+	case cmd.call.value != nil && cmd.call.value.Sign() > 0:
 		valueLit := Uint256(cmd.call.value)
 		slot, err := state.allocateLiteral(valueLit)
 		if err != nil {
