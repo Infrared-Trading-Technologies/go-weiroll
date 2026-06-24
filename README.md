@@ -13,13 +13,13 @@ Weiroll is a virtual machine that batches Ethereum operations via a scripted com
 ## Installation
 
 ```bash
-go get github.com/branched-services/go-weiroll@latest
+go get github.com/Infrared-Trading-Technologies/go-weiroll@latest
 ```
 
 Or pin to a specific version:
 
 ```bash
-go get github.com/branched-services/go-weiroll@v0.0.1
+go get github.com/Infrared-Trading-Technologies/go-weiroll@v0.0.1
 ```
 
 ## Quick Start
@@ -29,7 +29,7 @@ package main
 
 import (
     "math/big"
-    "github.com/branched-services/go-weiroll"
+    "github.com/Infrared-Trading-Technologies/go-weiroll"
     "github.com/ethereum/go-ethereum/common"
 )
 
@@ -158,7 +158,7 @@ The planner automatically optimizes state usage:
 
 ## Versioning
 
-This project follows [Semantic Versioning](https://semver.org/). See the [releases](https://github.com/branched-services/go-weiroll/releases) for available versions, and [`docs/releasing.md`](./docs/releasing.md) for the release workflow.
+This project follows [Semantic Versioning](https://semver.org/). See the [releases](https://github.com/Infrared-Trading-Technologies/go-weiroll/releases) for available versions, and [`docs/releasing.md`](./docs/releasing.md) for the release workflow.
 
 ## Testing
 

@@ -9,8 +9,8 @@
 // VM contract that's running the plan), read the executor's balance
 // and feed it into the next step. Common shape:
 //
-//   wrap ETH -> swap on Uniswap -> read USDC.balanceOf(executor)
-//                                  -> supply USDC to Aave on behalf of user
+//	wrap ETH -> swap on Uniswap -> read USDC.balanceOf(executor)
+//	                               -> supply USDC to Aave on behalf of user
 //
 // go-weiroll has no `Self()` sentinel: you must pass the executor
 // address as a literal at plan time. That's a deliberate scope choice —
@@ -20,44 +20,44 @@
 //
 // Pitfalls (every one of these has burned someone):
 //
-//   1. Pre-existing balance contamination.
-//      balanceOf(executor) returns TOTAL balance, not "what this recipe
-//      produced." Dust, leftover from a prior step, or attacker-planted
-//      transfers all inflate the read. In a per-user proxy this is an
-//      accounting bug; in a shared executor it can be exploitable.
+//  1. Pre-existing balance contamination.
+//     balanceOf(executor) returns TOTAL balance, not "what this recipe
+//     produced." Dust, leftover from a prior step, or attacker-planted
+//     transfers all inflate the read. In a per-user proxy this is an
+//     accounting bug; in a shared executor it can be exploitable.
 //
-//   2. Forced sends are unstoppable.
-//      Anyone can transfer an ERC20 to your executor address. ETH can
-//      be force-credited via coinbase payments (selfdestruct as a
-//      forced-send was effectively retired in EIP-6780/Cancun, but
-//      direct transfers and coinbase tips still work). You cannot
-//      prevent your executor from receiving tokens between commands.
+//  2. Forced sends are unstoppable.
+//     Anyone can transfer an ERC20 to your executor address. ETH can
+//     be force-credited via coinbase payments (selfdestruct as a
+//     forced-send was effectively retired in EIP-6780/Cancun, but
+//     direct transfers and coinbase tips still work). You cannot
+//     prevent your executor from receiving tokens between commands.
 //
-//   3. Threat model depends on executor design.
-//      - Per-user proxy (each wallet -> cloned VM): risk limited to
-//        your own dust. The bug surface is small and recoverable.
-//      - Shared executor (one VM serves many users): another user's
-//        mid-flight balance, or an attacker's planted transfer, can
-//        poison the read. This pattern requires snapshot-diff (read
-//        before AND after, subtract) — a single post-action read is
-//        wrong by construction.
+//  3. Threat model depends on executor design.
+//     - Per-user proxy (each wallet -> cloned VM): risk limited to
+//     your own dust. The bug surface is small and recoverable.
+//     - Shared executor (one VM serves many users): another user's
+//     mid-flight balance, or an attacker's planted transfer, can
+//     poison the read. This pattern requires snapshot-diff (read
+//     before AND after, subtract) — a single post-action read is
+//     wrong by construction.
 //
-//   4. ERC777 reentrancy.
-//      ERC777 transfers fire `tokensReceived` hooks that can mutate
-//      state between two balanceOf reads in the same transaction.
-//      Rare but real, and audit-flagged.
+//  4. ERC777 reentrancy.
+//     ERC777 transfers fire `tokensReceived` hooks that can mutate
+//     state between two balanceOf reads in the same transaction.
+//     Rare but real, and audit-flagged.
 //
-//   5. Share / wrapper token unit confusion.
-//      cTokens, yvTokens, ERC4626 vault shares: balanceOf is in share
-//      units, not underlying. Naming a `*ReturnValue` "usdcBal" while
-//      it actually holds cUSDC shares will break any downstream Action
-//      that expects underlying.
+//  5. Share / wrapper token unit confusion.
+//     cTokens, yvTokens, ERC4626 vault shares: balanceOf is in share
+//     units, not underlying. Naming a `*ReturnValue` "usdcBal" while
+//     it actually holds cUSDC shares will break any downstream Action
+//     that expects underlying.
 //
-//   6. Rebasing tokens.
-//      stETH, AMPL, aTokens: balance changes between blocks. Within a
-//      single tx the snapshot is fine; if your recipe spans blocks
-//      (it can't, weiroll is one tx) you'd be wrong, but within tx
-//      this is moot.
+//  6. Rebasing tokens.
+//     stETH, AMPL, aTokens: balance changes between blocks. Within a
+//     single tx the snapshot is fine; if your recipe spans blocks
+//     (it can't, weiroll is one tx) you'd be wrong, but within tx
+//     this is moot.
 package main
 
 import (
@@ -67,7 +67,7 @@ import (
 	"math/big"
 	"time"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum/common"
 )
 

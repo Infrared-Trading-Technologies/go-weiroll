@@ -8,25 +8,25 @@
 //
 // Pitfalls (all real, all hit users):
 //
-//   1. Pre-existing balance contamination.
-//      aToken.balanceOf(onBehalf) returns the cumulative position, not
-//      this supply's delta. Any prior aToken balance inflates the read.
-//      Only safe when onBehalf is freshly created (per-user proxy).
+//  1. Pre-existing balance contamination.
+//     aToken.balanceOf(onBehalf) returns the cumulative position, not
+//     this supply's delta. Any prior aToken balance inflates the read.
+//     Only safe when onBehalf is freshly created (per-user proxy).
 //
-//   2. Rebasing.
-//      aTokens accrue interest by rebasing balanceOf. Within one tx the
-//      snapshot is fine; across blocks it drifts.
+//  2. Rebasing.
+//     aTokens accrue interest by rebasing balanceOf. Within one tx the
+//     snapshot is fine; across blocks it drifts.
 //
-//   3. Share-token unit confusion (other protocols).
-//      For cTokens, yvTokens, ERC4626 vault shares, balanceOf is in
-//      *share* units, not underlying. Naming a field "usdcBal" while
-//      it actually holds cUSDC shares is a bug.
+//  3. Share-token unit confusion (other protocols).
+//     For cTokens, yvTokens, ERC4626 vault shares, balanceOf is in
+//     *share* units, not underlying. Naming a field "usdcBal" while
+//     it actually holds cUSDC shares is a bug.
 //
-//   4. Fee-on-transfer underlying.
-//      If the supplied asset is fee-on-transfer (e.g., some USDT
-//      configurations, PAXG), the deposited amount differs from the
-//      input amount and from the post-action read. Be explicit about
-//      which one you mean.
+//  4. Fee-on-transfer underlying.
+//     If the supplied asset is fee-on-transfer (e.g., some USDT
+//     configurations, PAXG), the deposited amount differs from the
+//     input amount and from the post-action read. Be explicit about
+//     which one you mean.
 package main
 
 import (
@@ -35,7 +35,7 @@ import (
 	"log"
 	"math/big"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -75,9 +75,9 @@ const aTokenABI = `[
 ]`
 
 func main() {
-	pool := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")    // Aave V3 Pool
-	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")    // USDC
-	aUSDC := common.HexToAddress("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c")   // aEthUSDC v3
+	pool := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")     // Aave V3 Pool
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")     // USDC
+	aUSDC := common.HexToAddress("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c")    // aEthUSDC v3
 	onBehalf := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") // freshly minted proxy
 	recipient := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 

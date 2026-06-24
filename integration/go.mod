@@ -1,9 +1,9 @@
-module github.com/branched-services/go-weiroll/integration
+module github.com/Infrared-Trading-Technologies/go-weiroll/integration
 
 go 1.24.0
 
 require (
-	github.com/branched-services/go-weiroll v0.0.0
+	github.com/Infrared-Trading-Technologies/go-weiroll v0.0.0
 	github.com/ethereum/go-ethereum v1.17.2
 )
 
@@ -38,4 +38,4 @@ require (
 	golang.org/x/sys v0.40.0 // indirect
 )
 
-replace github.com/branched-services/go-weiroll => ../
+replace github.com/Infrared-Trading-Technologies/go-weiroll => ../

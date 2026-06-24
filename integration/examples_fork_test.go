@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -764,13 +764,13 @@ func TestForkUniV3SwapStaticTupleInput(t *testing.T) {
 	planner.Add(weth.MustInvoke("approve", mainnetUniV3Router02, maxUint))
 
 	params := weiroll.Tuple(
-		weiroll.Address(mainnetWETH),                                  // tokenIn
-		weiroll.Address(mainnetUSDC),                                  // tokenOut
-		weiroll.MustLiteralFromType("uint24", big.NewInt(500)),        // fee = 0.05%
-		weiroll.Address(from),                                         // recipient
-		weiroll.Uint256(swapAmount),                                   // amountIn
-		weiroll.Uint256(big.NewInt(0)),                                // amountOutMinimum
-		weiroll.MustLiteralFromType("uint160", big.NewInt(0)),         // sqrtPriceLimitX96
+		weiroll.Address(mainnetWETH),                           // tokenIn
+		weiroll.Address(mainnetUSDC),                           // tokenOut
+		weiroll.MustLiteralFromType("uint24", big.NewInt(500)), // fee = 0.05%
+		weiroll.Address(from),                                  // recipient
+		weiroll.Uint256(swapAmount),                            // amountIn
+		weiroll.Uint256(big.NewInt(0)),                         // amountOutMinimum
+		weiroll.MustLiteralFromType("uint160", big.NewInt(0)),  // sqrtPriceLimitX96
 	)
 	planner.Add(router.MustInvoke("exactInputSingle", params))
 
@@ -1058,4 +1058,3 @@ func TestForkUniV3MultiHopWithChainedAmount(t *testing.T) {
 		t.Errorf("VM should have 0 WETH after hop 1 (sent to router); got %s", vmWETHAfter)
 	}
 }
-

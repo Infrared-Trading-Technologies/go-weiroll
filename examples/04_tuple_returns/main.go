@@ -1,26 +1,27 @@
 // Case 4: Function returns a tuple.
 //
 // Example: Uniswap V3 NonfungiblePositionManager.mint returns
-//   (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+//
+//	(uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
 //
 // A weiroll *ReturnValue is one slot. Tuples need extraction helpers.
 //
 // The pattern, demonstrated end-to-end below:
 //
-//   1. Call the producer with .RawReturn(). The VM stores the entire
-//      returndata as a length-prefixed bytes blob in the slot. The
-//      *ReturnValue you get back is typed as `bytes` (dynamic).
+//  1. Call the producer with .RawReturn(). The VM stores the entire
+//     returndata as a length-prefixed bytes blob in the slot. The
+//     *ReturnValue you get back is typed as `bytes` (dynamic).
 //
-//   2. Call a tuple-extraction helper that takes (bytes, index) and
-//      returns bytes32 (one ABI word from the tuple).
+//  2. Call a tuple-extraction helper that takes (bytes, index) and
+//     returns bytes32 (one ABI word from the tuple).
 //
-//   3. If the field's real type is uint256/address/bool (anything
-//      32-byte static), use ReturnValue.As to reinterpret the bytes32
-//      as the correct type — off-chain, no extra command.
+//  3. If the field's real type is uint256/address/bool (anything
+//     32-byte static), use ReturnValue.As to reinterpret the bytes32
+//     as the correct type — off-chain, no extra command.
 //
-//   4. Use the typed *ReturnValue as input to a downstream call.
-//      Below, the extracted tokenId flows directly into
-//      NPM.transferFrom to ship the freshly-minted LP NFT to the user.
+//  4. Use the typed *ReturnValue as input to a downstream call.
+//     Below, the extracted tokenId flows directly into
+//     NPM.transferFrom to ship the freshly-minted LP NFT to the user.
 //
 // Pitfalls:
 //
@@ -43,7 +44,7 @@ import (
 	"log"
 	"math/big"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -122,7 +123,7 @@ func main() {
 	npmAddr := common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88")    // Uniswap V3 NPM
 	helperAddr := common.HexToAddress("0x0000000000000000000000000000000000DEAD01") // your deployment
 	vmAddr := common.HexToAddress("0xEEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0EEE0")     // weiroll executor
-	user := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")        // who gets the NFT
+	user := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")       // who gets the NFT
 
 	npm := weiroll.NewContract(npmAddr, weiroll.MustParseABI(npmABI))
 	helper := weiroll.NewContract(helperAddr, weiroll.MustParseABI(tupleHelperABI))

@@ -9,7 +9,7 @@ import (
 	"log"
 	"math/big"
 
-	"github.com/branched-services/go-weiroll"
+	"github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -123,9 +123,9 @@ func main() {
 	planner := weiroll.New()
 
 	// Parameters
-	amountIn := big.NewInt(1e18)             // 1 WETH
-	minAmountOut := big.NewInt(0)            // Accept any amount (in practice, use proper slippage)
-	deadline := big.NewInt(1735689600)       // Far future timestamp
+	amountIn := big.NewInt(1e18)       // 1 WETH
+	minAmountOut := big.NewInt(0)      // Accept any amount (in practice, use proper slippage)
+	deadline := big.NewInt(1735689600) // Far future timestamp
 	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 
 	fmt.Println("Building multi-step Uniswap V2 swap plan...")

@@ -1,4 +1,4 @@
-module github.com/branched-services/go-weiroll
+module github.com/Infrared-Trading-Technologies/go-weiroll
 
 go 1.24.0
 

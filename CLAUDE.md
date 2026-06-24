@@ -55,7 +55,7 @@ git push origin main
 git tag -a vX.Y.Z -m "vX.Y.Z: <subject>\n\n<bullets>"
 git push origin vX.Y.Z
 gh release create vX.Y.Z --title "vX.Y.Z — <subject>" --notes "..."
-curl -sL "https://proxy.golang.org/github.com/branched-services/go-weiroll/@latest"  # verify
+curl -sL "https://proxy.golang.org/github.com/Infrared-Trading-Technologies/go-weiroll/@latest"  # verify
 ```
 
 Release notes group by impact: **Fixes**, **New API**, **Upgrade notes**. Skip empty sections.

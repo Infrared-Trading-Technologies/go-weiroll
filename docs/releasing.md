@@ -27,7 +27,7 @@ EOF
 )"
 
 # 5. Verify the Go module proxy picked it up
-curl -sL "https://proxy.golang.org/github.com/branched-services/go-weiroll/@latest"
+curl -sL "https://proxy.golang.org/github.com/Infrared-Trading-Technologies/go-weiroll/@latest"
 ```
 
 That's the entire process. Go modules are published purely via git tags — no registry, no CI step, nothing else.
@@ -93,15 +93,15 @@ Skip sections that are empty. Use backticks for symbols, link to PRs/issues if a
 | Tagged the wrong commit (already pushed) | Ship `vX.Y.Z+1` with the correct content. Don't retract. |
 | Wrong release notes on GitHub | `gh release edit vX.Y.Z --notes "..."` — fine, this is just the human-readable layer. |
 | Bad code shipped under a tag | Ship `vX.Y.Z+1` with the fix. Edit the bad release's notes to point at the replacement. |
-| `go get @latest` didn't see the new version | Wait a few minutes for the proxy. If still missing: `curl https://proxy.golang.org/github.com/branched-services/go-weiroll/@v/vX.Y.Z.info` to force a fetch. |
+| `go get @latest` didn't see the new version | Wait a few minutes for the proxy. If still missing: `curl https://proxy.golang.org/github.com/Infrared-Trading-Technologies/go-weiroll/@v/vX.Y.Z.info` to force a fetch. |
 
 ## Verification
 
 After the tag is pushed, the Go module proxy should pick it up within minutes:
 
 ```bash
-curl -sL "https://proxy.golang.org/github.com/branched-services/go-weiroll/@v/list" | sort -V
-curl -sL "https://proxy.golang.org/github.com/branched-services/go-weiroll/@latest"
+curl -sL "https://proxy.golang.org/github.com/Infrared-Trading-Technologies/go-weiroll/@v/list" | sort -V
+curl -sL "https://proxy.golang.org/github.com/Infrared-Trading-Technologies/go-weiroll/@latest"
 ```
 
 The `@latest` response is the source of truth for what `go get @latest` will resolve to.

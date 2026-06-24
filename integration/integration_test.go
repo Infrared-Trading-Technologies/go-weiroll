@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"

@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"log"
 
-	weiroll "github.com/branched-services/go-weiroll"
+	weiroll "github.com/Infrared-Trading-Technologies/go-weiroll"
 	"github.com/ethereum/go-ethereum/common"
 )
 
